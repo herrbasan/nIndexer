@@ -6,6 +6,20 @@ Split the code indexing functionality from the `codebase` agent into an independ
 
 ---
 
+## Core Development Maxims
+
+**Priorities: Reliability > Performance > Everything else.**
+
+**LLM-Native Codebase:** Code readability and structure for humans is a non-goal. The code will not be maintained by humans. Optimize for the most efficient structure an LLM can understand. Do not rely on conventional human coding habits.
+
+**Vanilla JS:** No TypeScript anywhere. Code must stay as close to the bare platform as possible for easy optimization and debugging. .d.ts files are generated strictly for LLM/editor context, not used at runtime.
+
+**Zero Dependencies:** If we can build it ourselves using raw standard libraries, we build it. Avoid external third-party packages. Evaluate per-case if a dependency is truly necessary.
+
+**Fail Fast, Always:** No defensive coding. No mock data, no fallback defaults, and no silencing try/catch blocks. The goal is to write perfect, deterministic software. When it breaks, let it crash and fix the root cause.
+
+---
+
 ## 1. Current Architecture
 
 ```
@@ -100,8 +114,9 @@ Split the code indexing functionality from the `codebase` agent into an independ
 
 ### Base URL
 ```
-http://localhost:3101/api/v1
+http://localhost:<port>/api/v1
 ```
+**Note**: The port is configured in `config.json` → `service.port`
 
 ### Endpoints
 
@@ -262,7 +277,7 @@ The new microservice should **not copy** the nVDB submodule. Instead:
 {
   "service": {
     "host": "localhost",
-    "port": 3101,
+    "port": <from config>,  // Use value from config.json service.port
     "cors": false
   },
   "storage": {
@@ -531,9 +546,10 @@ export class LLMClient {
 
 ```javascript
 // src/agents/codebase/http-client.js
+// URL constructed from config: http://localhost:<service.port>/api/v1
 export class IndexingServiceClient {
-  constructor(baseUrl = 'http://localhost:3101/api/v1') {
-    this.baseUrl = baseUrl;
+  constructor(baseUrl) {
+    this.baseUrl = baseUrl;  // Pass from config
   }
 
   async indexCodebase(source, name, options) {

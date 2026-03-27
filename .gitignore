@@ -1,0 +1,15 @@
+# Data directories
+data/
+
+# Local configuration (contains secrets/paths)
+config.json
+
+# Dependencies (if we ever add any)
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
