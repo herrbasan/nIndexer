@@ -1,0 +1,23 @@
+{
+  "name": "nindexer",
+  "version": "1.0.0",
+  "description": "Code Indexing Microservice - vector-based semantic search, keyword indexing, and file analysis",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "express-rate-limit": "^7.1.0",
+    "js-yaml": "^4.1.0",
+    "ws": "^8.14.2"
+  },
+  "devDependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
