@@ -297,6 +297,25 @@ export class CodebaseMaintenance {
   }
 
   _matchGlob(path, pattern) {
+    // Handle ** globstar specially - it means "match any path containing this"
+    const hasGlobstar = pattern.includes('**');
+
+    if (hasGlobstar) {
+      // For patterns like **/something/**, we need to match the literal directory
+      // at any boundary position in the path
+      const parts = pattern.split('**');
+      if (parts.length === 3 && parts[0] === '' && parts[2] === '') {
+        // Pattern is **/something/**
+        const middle = parts[1]; // e.g., /node_modules/
+        const dir = middle.replace(/^\//, '').replace(/\/$/, ''); // node_modules
+        // Match if path contains /dir/ or starts with dir/
+        const escaped = dir.replace(/[.+^$|()[\]\\]/g, '\\$&');
+        const regex = new RegExp(`(^|/)${escaped}(/|$)`);
+        return regex.test(path);
+      }
+    }
+
+    // For patterns without **, do standard glob-to-regex conversion
     let regex = pattern
       .replace(/\*\*/g, '{{GLOBSTAR}}')
       .replace(/\*/g, '[^/]*')

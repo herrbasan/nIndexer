@@ -27,103 +27,7 @@ const DEFAULT_CONFIG = {
   // embeddingModel is read from environment or config - no hardcoded default
   // This ensures it matches the router's configured embedding provider
   maxFileSize: 1024 * 1024, // 1MB
-  ignorePatterns: [
-    // Build artifacts
-    '**/node_modules/**',
-    '**/.git/**',
-    '**/.svn/**',
-    '**/.hg/**',
-    '**/.vscode/**',
-    '**/.idea/**',
-    '**/.vs/**',
-    '**/dist/**',
-    '**/build/**',
-    '**/.next/**',
-    '**/out/**',
-    '**/target/**',
-    '**/bin/**',
-    '**/obj/**',
-    '**/Debug/**',
-    '**/Release/**',
-    // Python
-    '**/__pycache__/**',
-    '**/.venv/**',
-    '**/venv/**',
-    '**/.pytest_cache/**',
-    '**/.mypy_cache/**',
-    '*.pyc',
-    '*.pyo',
-    '**/*.egg-info/**',
-    // Coverage/Temp
-    '**/coverage/**',
-    '**/.nyc_output/**',
-    '**/.coverage/**',
-    '**/htmlcov/**',
-    '**/.tmp/**',
-    '**/tmp/**',
-    '**/temp/**',
-    '*.tmp',
-    // Logs & locks
-    '*.log',
-    '*.lock',
-    'package-lock.json',
-    'yarn.lock',
-    'Cargo.lock',
-    'composer.lock',
-    'Pipfile.lock',
-    'poetry.lock',
-    // Generated files
-    '*.map',
-    '**/*.min.js',
-    '**/*.min.css',
-    '**/*.d.ts',
-    '*.generated.*',
-    // Binary media (explicitly excluded)
-    '*.png',
-    '*.jpg',
-    '*.jpeg',
-    '*.gif',
-    '*.bmp',
-    '*.ico',
-    '*.webp',
-    '*.svg',  // SVG can be text but usually assets, skip by default
-    '*.mp3',
-    '*.mp4',
-    '*.avi',
-    '*.mov',
-    '*.wmv',
-    '*.wav',
-    '*.ogg',
-    '*.webm',
-    '*.pdf',
-    '*.doc',
-    '*.docx',
-    '*.xls',
-    '*.xlsx',
-    '*.ppt',
-    '*.pptx',
-    '*.zip',
-    '*.tar',
-    '*.gz',
-    '*.rar',
-    '*.7z',
-    '*.exe',
-    '*.dll',
-    '*.so',
-    '*.dylib',
-    '*.bin',
-    '*.dat',
-    '*.db',
-    '*.sqlite',
-    '*.sqlite3',
-    // Misc
-    '.DS_Store',
-    'Thumbs.db',
-    '*.bak',
-    '*.swp',
-    '*.swo',
-    '*~'
-  ]
+  ignorePatterns: [] // Patterns must be provided in config.json
 };
 
 export class CodebaseIndexingService {
@@ -135,13 +39,13 @@ export class CodebaseIndexingService {
     this.searchRouter = new SearchRouter();
     this.grepSearcher = new GrepSearcher();
     this.progressCallback = null;
-    
+
     // Initialize maintenance module
     this.maintenance = new CodebaseMaintenance(this, config.maintenance);
-    
+
     // Store spaces configuration for path resolution
     this.spaces = config.spaces || {};
-    
+
     // Preload all codebases into memory for fast global search
     this.preloaded = false;
   }

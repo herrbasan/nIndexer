@@ -22,6 +22,24 @@ const PARSERS = {
   '.rs': parseRust
 };
 
+// Known binary file extensions - these are never read, only indexed by name
+const BINARY_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.webp',
+  '.mp3', '.mp4', '.avi', '.mov', '.wmv', '.wav', '.ogg', '.webm',
+  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+  '.zip', '.tar', '.gz', '.rar', '.7z',
+  '.exe', '.dll', '.so', '.dylib', '.bin', '.dat',
+  '.db', '.sqlite', '.sqlite3',
+  '.woff', '.woff2', '.ttf', '.eot', '.otf',
+  '.swf', '.flv', '.f4v',
+  '.psd', '.ai', '.eps', '.raw',
+  '.class', '.o', '.obj', '.lib', '.a', '.lib',
+  '.pyc', '.pyo', '.pyd',
+  '.d.ts', // TypeScript declarations are just metadata
+  '.min.js', '.min.css', // minified files
+  '.lock', '.log' // lock files and logs
+]);
+
 export class Indexer {
   constructor(config, llmRouter) {
     this.config = config;
@@ -237,7 +255,21 @@ export class Indexer {
    * Parse a single file (no embedding yet)
    */
   async _parseFile(fileInfo) {
-    const { fullPath, relativePath, mtime, size, ext } = fileInfo;
+    const { fullPath, relativePath, mtime, size, ext, isBinary } = fileInfo;
+
+    // For binary files, skip reading content - index by name/path only
+    if (isBinary) {
+      return {
+        relativePath,
+        mtime,
+        size,
+        ext,
+        hash: null,
+        content: null,
+        symbols: { functions: [], classes: [], imports: [] },
+        embeddingText: relativePath // Just the path for binary files
+      };
+    }
 
     const content = await fs.readFile(fullPath, 'utf-8');
     const hash = createHash('md5').update(content).digest('hex');
@@ -279,28 +311,43 @@ export class Indexer {
         if (stats.size > this.config.maxFileSize) continue;
 
         const ext = path.extname(entry.name).toLowerCase();
-        
-        // Skip binary files by checking for null bytes in first chunk
-        try {
-          const fd = await fs.open(fullPath, 'r');
-          const buffer = Buffer.alloc(1024);
-          const { bytesRead } = await fd.read(buffer, 0, 1024, 0);
-          await fd.close();
-          
-          // Check for null bytes = binary file
-          if (bytesRead > 0 && buffer.slice(0, bytesRead).includes(0)) {
-            continue;
+        const isKnownBinary = BINARY_EXTENSIONS.has(ext);
+
+        // Also check for extension-based patterns that indicate binary/minified
+        const fileName = entry.name.toLowerCase();
+        const isMinifiedOrGenerated = fileName.endsWith('.min.js') || fileName.endsWith('.min.css') ||
+            fileName.endsWith('.map') || fileName.endsWith('.d.ts') ||
+            fileName.endsWith('.lock') || fileName.endsWith('.log');
+
+        // For known binary extensions or detected binary content, index by name only
+        let isBinary = isKnownBinary || isMinifiedOrGenerated;
+        let content = null;
+
+        if (!isBinary) {
+          // Check for null bytes (unknown binary files)
+          try {
+            const fd = await fs.open(fullPath, 'r');
+            const buffer = Buffer.alloc(1024);
+            const { bytesRead } = await fd.read(buffer, 0, 1024, 0);
+            await fd.close();
+
+            // Check for null bytes = binary file
+            if (bytesRead > 0 && buffer.slice(0, bytesRead).includes(0)) {
+              isBinary = true;
+            }
+          } catch {
+            isBinary = true; // Can't read, treat as binary
           }
-        } catch {
-          continue; // Can't read, skip
         }
 
+        // Index file regardless (binary files indexed by name only)
         files.push({
           fullPath,
           relativePath,
           mtime: stats.mtimeMs,
           size: stats.size,
-          ext
+          ext,
+          isBinary
         });
       }
     }
@@ -314,6 +361,31 @@ export class Indexer {
   }
 
   _matchGlob(path, pattern) {
+    // Convert glob pattern to regex
+    // Handle ** globstar specially - it means "match any path containing this"
+    // Single * matches within a single path segment (no slashes)
+    // ** matches zero or more path segments
+
+    // For patterns like **/node_modules/** or **/foo/**, we need to match
+    // the literal directory name at any boundary position in the path
+    const hasGlobstar = pattern.includes('**');
+
+    if (hasGlobstar) {
+      // For patterns with **, match the literal part after **/
+      // e.g., **/node_modules/** should match paths CONTAINING node_modules/
+      const parts = pattern.split('**');
+      if (parts.length === 3 && parts[0] === '' && parts[2] === '') {
+        // Pattern is **/something/**
+        const middle = parts[1]; // e.g., /node_modules/
+        const dir = middle.replace(/^\//, '').replace(/\/$/, ''); // node_modules
+        // Match if path contains /dir/ or starts with dir/
+        const escaped = dir.replace(/[.+^$|()[\]\\]/g, '\\$&');
+        const regex = new RegExp(`(^|/)${escaped}(/|$)`);
+        return regex.test(path);
+      }
+    }
+
+    // For patterns without **, do standard glob-to-regex conversion
     let regex = pattern
       .replace(/\*\*/g, '{{GLOBSTAR}}')
       .replace(/\*/g, '[^/]*')
@@ -321,7 +393,7 @@ export class Indexer {
       .replace(/\/\{\{GLOBSTAR\}\}$/, '(?:/.*)?')
       .replace(/^\{\{GLOBSTAR\}\}\//, '(?:.*/)?')
       .replace(/\{\{GLOBSTAR\}\}/g, '.*');
-    
+
     return new RegExp(`^${regex}$`).test(path);
   }
 
