@@ -350,11 +350,19 @@ export class CodebaseIndexingService {
     }
 
     const codebasePath = this._getCodebasePath(name);
-    
+
     // Check if already exists
     try {
       await fs.access(codebasePath);
-      throw new Error(`Codebase '${name}' already exists. Use refreshCodebase() to update.`);
+      // Index exists - check if it's partial/interrupted
+      const existingMetadata = await this._loadCodebaseMetadata(name);
+      if (existingMetadata?.status === 'indexing' || existingMetadata?.status === 'partial') {
+        // Partial index from interrupted run - delete and re-index
+        console.log(`[${name}] Detected partial index, rebuilding...`);
+        await this.removeCodebase({ name, permanent: true });
+      } else {
+        throw new Error(`Codebase '${name}' already indexed. Use refreshCodebase() to update.`);
+      }
     } catch (err) {
       if (err.code !== 'ENOENT') throw err;
     }
