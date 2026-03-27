@@ -1124,18 +1124,45 @@ IMPLEMENTATION_PATTERNS:
     if (codebase) {
       return this._runMaintenanceOnCodebase(codebase, reindex, analyze);
     } else {
-      // Run on all codebases
-      const codebases = await this.listCodebases();
+      // Run on all codebases from config + orphaned indexes
+      const configCodebases = await this._getAllConfiguredCodebases();
+      const indexedCodebases = await this.listCodebases();
+      const indexedNames = new Set(indexedCodebases.map(cb => cb.name));
       const results = [];
-      for (const cb of codebases) {
-        const result = await this._runMaintenanceOnCodebase(cb.name, reindex, analyze);
+
+      // First, process orphaned indexes (indexed but not in config)
+      for (const cb of indexedCodebases) {
+        if (!configCodebases.has(cb.name)) {
+          const result = await this._runMaintenanceOnCodebase(cb.name, reindex, analyze);
+          results.push(result);
+        }
+      }
+
+      // Then, process codebases in config
+      for (const name of configCodebases) {
+        const result = await this._runMaintenanceOnCodebase(name, reindex, analyze);
         results.push(result);
       }
+
       return {
         message: 'Maintenance cycle complete',
         codebasesProcessed: results.length,
         results
       };
+    }
+  }
+
+  /**
+   * Get all codebase names from config
+   */
+  async _getAllConfiguredCodebases() {
+    try {
+      const configPath = path.join(process.cwd(), 'data', 'codebases.json');
+      const raw = await fs.readFile(configPath, 'utf8');
+      const codebasesConfig = JSON.parse(raw);
+      return new Set(Object.keys(codebasesConfig.codebases || {}));
+    } catch {
+      return new Set();
     }
   }
 
@@ -1195,7 +1222,9 @@ IMPLEMENTATION_PATTERNS:
    */
   async _getCodebaseSourcePath(codebaseName) {
     try {
-      const { default: codebasesConfig } = await import('../../data/codebases.json', { assert: { type: 'json' } });
+      const configPath = path.join(process.cwd(), 'data', 'codebases.json');
+      const raw = await fs.readFile(configPath, 'utf8');
+      const codebasesConfig = JSON.parse(raw);
       return codebasesConfig.codebases?.[codebaseName] || null;
     } catch {
       return null;
