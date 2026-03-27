@@ -1,5 +1,6 @@
 # Data directories
 data/
+data/trash/
 
 # Local configuration (contains secrets/paths)
 config.json

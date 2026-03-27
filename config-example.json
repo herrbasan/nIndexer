@@ -24,11 +24,8 @@
     "gatewayHttpUrl": "http://localhost:3400",
     "embedModel": "lmstudio-embed",
     "models": {
-      "query": "glm-chat",
-      "analysis": "glm-chat"
+      "query": "glm5-chat",
+      "analysis": "glm5-chat"
     }
-  },
-  "spaces": {
-    "COOLKID-Work": ["\\\\COOLKID\\Work\\Work", "d:\\Work"]
   }
 }
