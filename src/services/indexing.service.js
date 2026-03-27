@@ -488,6 +488,23 @@ export class CodebaseIndexingService {
   }
 
   /**
+   * Copy directory recursively (for Windows EPERM workaround)
+   */
+  async _copyDir(src, dest) {
+    await fs.mkdir(dest, { recursive: true });
+    const entries = await fs.readdir(src, { withFileTypes: true });
+    for (const entry of entries) {
+      const srcPath = path.join(src, entry.name);
+      const destPath = path.join(dest, entry.name);
+      if (entry.isDirectory()) {
+        await this._copyDir(srcPath, destPath);
+      } else {
+        await fs.copyFile(srcPath, destPath);
+      }
+    }
+  }
+
+  /**
    * Remove a codebase and all its data (moves to trash by default)
    */
   async removeCodebase({ name, permanent = false }) {
@@ -496,8 +513,9 @@ export class CodebaseIndexingService {
 
     // Close if open
     if (this.indexes.has(name)) {
-      const { metadata } = this.indexes.get(name);
+      const { db, metadata } = this.indexes.get(name);
       metadata.close();
+      db?.close?.();
       this.indexes.delete(name);
     }
 
@@ -506,9 +524,19 @@ export class CodebaseIndexingService {
       await fs.rm(codebasePath, { recursive: true, force: true });
       return { name, deleted: true };
     } else {
-      // Move to trash
+      // Move to trash - use rm+mkdir workaround for Windows EPERM issues
       await fs.mkdir(this.config.trashDir, { recursive: true });
-      await fs.rename(codebasePath, trashPath);
+      try {
+        await fs.rename(codebasePath, trashPath);
+      } catch (err) {
+        if (err.code === 'EPERM') {
+          // On Windows, fall back to copy+delete
+          await this._copyDir(codebasePath, trashPath);
+          await fs.rm(codebasePath, { recursive: true, force: true });
+        } else {
+          throw err;
+        }
+      }
       return { name, removed: true, trashPath };
     }
   }
