@@ -1,6 +1,8 @@
 import { randomUUID } from 'crypto';
-import WebSocket from 'ws';
 import { config } from './config.js';
+
+// Use Node.js built-in WebSocket (Node.js 21+)
+const WebSocket = globalThis.WebSocket || globalThis.ws;
 
 export class LLMClient {
   constructor() {

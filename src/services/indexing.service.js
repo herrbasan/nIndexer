@@ -10,18 +10,19 @@
  * - ripgrep: Live exact text search
  */
 
-import { Database } from './nVDB/napi/index.js';
-import { SimpleMetadataStore } from './simple-metadata.js';
-import { Indexer } from './indexer.js';
-import { SearchRouter } from './search-router.js';
-import { GrepSearcher } from './grep.js';
-import { CodebaseMaintenance } from './maintenance.js';
-import { analyzeProject, isAnalysisStale, getPrioritizedFiles } from './project-analyzer.js';
+import { Database } from '../../nVDB/napi/index.js';
+import { SimpleMetadataStore } from './metadata.service.js';
+import { Indexer } from './indexer.service.js';
+import { SearchRouter } from './search-router.service.js';
+import { GrepSearcher } from './grep.service.js';
+import { CodebaseMaintenance } from './maintenance.service.js';
+import { analyzeProject, isAnalysisStale, getPrioritizedFiles } from './project-analyzer.service.js';
 import path from 'path';
 import fs from 'fs/promises';
 
 const DEFAULT_CONFIG = {
   dataDir: 'data/codebases',
+  trashDir: 'data/trash',
   embeddingDimension: 768,
   // embeddingModel is read from environment or config - no hardcoded default
   // This ensures it matches the router's configured embedding provider
@@ -487,23 +488,29 @@ export class CodebaseIndexingService {
   }
 
   /**
-   * Remove a codebase and all its data
+   * Remove a codebase and all its data (moves to trash by default)
    */
-  async removeCodebase({ name }) {
+  async removeCodebase({ name, permanent = false }) {
     const codebasePath = this._getCodebasePath(name);
-    
+    const trashPath = path.join(this.config.trashDir, `${name}_${Date.now()}`);
+
     // Close if open
     if (this.indexes.has(name)) {
       const { metadata } = this.indexes.get(name);
-      // Close SQLite connection
       metadata.close();
       this.indexes.delete(name);
     }
 
-    // Delete directory
-    await fs.rm(codebasePath, { recursive: true, force: true });
-
-    return { name, removed: true };
+    if (permanent) {
+      // Permanent delete
+      await fs.rm(codebasePath, { recursive: true, force: true });
+      return { name, deleted: true };
+    } else {
+      // Move to trash
+      await fs.mkdir(this.config.trashDir, { recursive: true });
+      await fs.rename(codebasePath, trashPath);
+      return { name, removed: true, trashPath };
+    }
   }
 
   /**
@@ -1078,20 +1085,92 @@ IMPLEMENTATION_PATTERNS:
   }
 
   /**
-   * Manually run maintenance cycle
+   * Run maintenance cycle with configurable options
+   *
+   * @param {Object} options
+   * @param {string} options.codebase - Specific codebase to maintain (omit for all)
+   * @param {string} options.reindex - Reindex mode: "if_missing" (build if not exists), "changed" (update existing), "always" (rebuild), null (changed only if exists)
+   * @param {boolean} options.analyze - Run LLM analysis after indexing (default: false)
    */
-  async runMaintenance({ codebase } = {}) {
+  async runMaintenance({ codebase, reindex, analyze = false } = {}) {
     if (codebase) {
-      // Refresh specific codebase
-      const result = await this.maintenance.checkAndRefresh(codebase);
-      return { codebase, ...result };
+      return this._runMaintenanceOnCodebase(codebase, reindex, analyze);
     } else {
-      // Run full maintenance cycle
-      await this.maintenance.runMaintenance();
-      return { 
+      // Run on all codebases
+      const codebases = await this.listCodebases();
+      const results = [];
+      for (const cb of codebases) {
+        const result = await this._runMaintenanceOnCodebase(cb.name, reindex, analyze);
+        results.push(result);
+      }
+      return {
         message: 'Maintenance cycle complete',
-        stats: this.maintenance.getStats()
+        codebasesProcessed: results.length,
+        results
       };
+    }
+  }
+
+  /**
+   * Run maintenance on a single codebase
+   */
+  async _runMaintenanceOnCodebase(codebaseName, reindexMode, runAnalyze) {
+    const codebases = await this.listCodebases();
+    const indexedCodebase = codebases.find(cb => cb.name === codebaseName);
+    const exists = !!indexedCodebase;
+
+    // Check if indexed codebase is still in config
+    const configSource = await this._getCodebaseSourcePath(codebaseName);
+    const orphaned = exists && !configSource;
+
+    if (orphaned) {
+      // Indexed but not in config - move to trash
+      const result = await this.removeCodebase({ name: codebaseName });
+      return { codebase: codebaseName, action: 'orphaned_removed', ...result };
+    }
+
+    // Determine action based on reindex mode
+    if (!exists) {
+      if (reindexMode === 'if_missing' || reindexMode === 'always' || reindexMode === true) {
+        // Need to index - get source path from codebases.json
+        if (!configSource) {
+          return { codebase: codebaseName, error: 'Codebase not found in configuration' };
+        }
+        const result = await this.indexCodebase({ name: codebaseName, source: configSource, analyze: runAnalyze });
+        return { codebase: codebaseName, action: 'indexed', ...result };
+      } else {
+        return { codebase: codebaseName, error: 'Codebase not indexed. Use reindex:"if_missing" to build.' };
+      }
+    }
+
+    // Codebase exists and is in config - check for changes
+    if (reindexMode === 'always') {
+      // Force rebuild
+      const result = await this.refreshCodebase({ name: codebaseName, analyze: runAnalyze });
+      return { codebase: codebaseName, action: 'rebuilt', ...result };
+    }
+
+    // Check for changes (default behavior)
+    const changeResult = await this.maintenance.checkAndRefresh(codebaseName);
+
+    if (changeResult.refreshed && runAnalyze) {
+      // Changes detected and analyzed - run analysis
+      const analysisResult = await this.analyzeCodebase({ name: codebaseName });
+      return { codebase: codebaseName, action: 'refreshed_with_analysis', refresh: changeResult, analysis: analysisResult };
+    }
+
+    return { codebase: codebaseName, action: changeResult.reason, ...changeResult };
+  }
+
+  /**
+   * Get source path for a codebase from codebases.json
+   */
+  async _getCodebaseSourcePath(codebaseName) {
+    try {
+      const { default: codebasesConfig } = await import('../../data/codebases.json', { assert: { type: 'json' } });
+      return codebasesConfig.codebases?.[codebaseName] || null;
+    } catch {
+      return null;
     }
   }
 
