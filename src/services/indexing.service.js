@@ -4,7 +4,7 @@
  * Fast semantic code search using nDB vector database.
  * 
  * Architecture:
- * - nDB: Vector storage and similarity search
+ * - nVDB: Vector storage and similarity search
  * - SQLite: Metadata (mtimes, hashes, file info)
  * - Tree-sitter: Code structure extraction
  * - ripgrep: Live exact text search
@@ -30,6 +30,28 @@ const DEFAULT_CONFIG = {
   ignorePatterns: [] // Patterns must be provided in config.json
 };
 
+const BINARY_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.svg', '.webp', '.tiff', '.tif',
+  '.mp3', '.mp4', '.wav', '.avi', '.mov', '.mkv', '.flac', '.ogg', '.webm',
+  '.zip', '.tar', '.gz', '.bz2', '.xz', '.7z', '.rar',
+  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+  '.exe', '.dll', '.so', '.dylib', '.bin', '.dat',
+  '.woff', '.woff2', '.ttf', '.eot', '.otf',
+  '.sqlite', '.db', '.idx'
+]);
+
+function _matchesExtension(filePath, filter) {
+  if (!filter) return true;
+  const ext = '.' + filePath.split('.').pop().toLowerCase();
+  if (filter.includeExtensions?.length > 0) {
+    return filter.includeExtensions.includes(ext);
+  }
+  if (filter.excludeExtensions?.length > 0) {
+    return !filter.excludeExtensions.includes(ext);
+  }
+  return true;
+}
+
 export class CodebaseIndexingService {
   constructor(config = {}, llmRouter) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -51,7 +73,7 @@ export class CodebaseIndexingService {
   }
   
   /**
-   * Preload all codebases into memory (nDB is in-memory, this loads from disk once)
+   * Preload all codebases into memory (nVDB is in-memory, this loads from disk once)
    */
   async preloadAll() {
     if (this.preloaded) return;
@@ -230,16 +252,15 @@ export class CodebaseIndexingService {
 
   /**
    * Index a new codebase
-   * @param {Object} options
-   * @param {string} options.name - Codebase name (e.g., "SoundApp")
-   * @param {string} [options.source] - Absolute path to source directory (optional if space provided)
-   * @param {string} [options.space] - Space name (e.g., "COOLKID-Work") - resolves project path
-   * @param {string} [options.project] - Project folder within space (defaults to name)
-   * @param {boolean} [options.analyze] - Run LLM analysis after indexing (default: false)
+   * @param {Object} args
+   * @param {string} args.name - Codebase name (e.g., "SoundApp")
+   * @param {string} [args.source] - Absolute path to source directory (optional if space provided)
+   * @param {string} [args.space] - Space name (e.g., "COOLKID-Work") - resolves project path
+   * @param {string} [args.project] - Project folder within space (defaults to name)
    * @param {Function} onProgress - Progress callback
    */
   async indexCodebase(args, onProgress) {
-    const { name, analyze = false } = args;
+    const { name } = args;
     if (!name) {
       throw new Error('name is required');
     }
@@ -274,7 +295,7 @@ export class CodebaseIndexingService {
     // Create directories
     await fs.mkdir(codebasePath, { recursive: true });
 
-    // Initialize nDB
+    // Initialize nVDB
     const db = new Database(path.join(codebasePath, 'nvdb'));
     const collection = db.createCollection('files', this.config.embeddingDimension, {
       durability: 'buffered'
@@ -310,20 +331,11 @@ export class CodebaseIndexingService {
       embeddingDimension: this.config.embeddingDimension
     });
 
-    // Store in memory
     this.indexes.set(name, { db, collection, metadata, source });
 
-    // Optional: Run LLM analysis after indexing
-    let analysisResult = null;
-    if (analyze && result.indexed > 0) {
-      try {
-        onProgress?.({ phase: 'analyzing', message: 'Running LLM project analysis...' });
-        analysisResult = await this.analyzeCodebase({ name }, onProgress);
-      } catch (err) {
-        console.warn(`[indexCodebase] Analysis failed: ${err.message}`);
-        analysisResult = { error: err.message };
-      }
-    }
+    this.analyzeCodebase({ name }).catch(err => {
+      console.log(`[${name}] Auto-analysis skipped: ${err.message}`);
+    });
 
     return {
       name,
@@ -332,13 +344,7 @@ export class CodebaseIndexingService {
       errors: result.errors,
       duration: result.duration,
       rate: result.rate,
-      errorsDetail: result.errorsDetail,
-      analysis: analysisResult ? {
-        completed: !!analysisResult.analyzed,
-        description: analysisResult.description,
-        duration: analysisResult.duration,
-        error: analysisResult.error
-      } : null
+      errorsDetail: result.errorsDetail
     };
   }
 
@@ -346,9 +352,8 @@ export class CodebaseIndexingService {
    * Refresh (incrementally update) a codebase
    * @param {Object} options
    * @param {string} options.name - Codebase name
-   * @param {boolean} [options.analyze] - Re-run LLM analysis if stale (default: false)
    */
-  async refreshCodebase({ name, analyze = false }, onProgress) {
+  async refreshCodebase({ name }, onProgress) {
     const codebase = await this._getCodebase(name);
     const metadataRecord = await this._loadCodebaseMetadata(name);
     
@@ -373,30 +378,7 @@ export class CodebaseIndexingService {
       fileCount: codebase.metadata.fileCount
     });
 
-    // Optional: Re-run analysis if requested and analysis exists and is stale
-    let analysisResult = null;
-    if (analyze && metadataRecord?.llmAnalysis) {
-      const isStale = await isAnalysisStale(metadataRecord.llmAnalysis, codebase.source);
-      if (isStale || result.indexed > 0) {
-        try {
-          onProgress?.({ phase: 'analyzing', message: 'Re-running LLM project analysis...' });
-          analysisResult = await this.analyzeCodebase({ name }, onProgress);
-        } catch (err) {
-          console.warn(`[refreshCodebase] Analysis failed: ${err.message}`);
-          analysisResult = { error: err.message };
-        }
-      }
-    }
-
-    return {
-      ...result,
-      analysis: analysisResult ? {
-        completed: !!analysisResult.analyzed,
-        description: analysisResult.description,
-        duration: analysisResult.duration,
-        error: analysisResult.error
-      } : null
-    };
+    return result;
   }
 
   /**
@@ -519,6 +501,9 @@ export class CodebaseIndexingService {
    * Run the indexing process
    */
   async _runIndexing(name, source, collection, metadata, incremental = false, onProgress) {
+    console.log(`[Indexing:perf] _runIndexing(${name}): start (incremental=${incremental})`);
+    const startTime = Date.now();
+    
     const result = await this.indexer.indexDirectory({
       source,
       collection,
@@ -530,8 +515,10 @@ export class CodebaseIndexingService {
       }
     });
 
-    // Flush to disk
+    const t0 = Date.now();
     collection.flush();
+    const flushTime = Date.now() - t0;
+    console.log(`[Indexing:perf] _runIndexing(${name}): collection.flush()=${flushTime}ms, total=${Date.now() - startTime}ms`);
 
     return result;
   }
@@ -539,10 +526,51 @@ export class CodebaseIndexingService {
   /**
    * Search by keyword (path + content)
    */
-  async searchKeyword({ codebase, query, limit = 20, searchContent = true }) {
-    const { metadata } = await this._getCodebase(codebase);
+  async searchKeyword({ codebase, query, limit = 20, searchContent = true, filter }) {
+    const { metadata, source } = await this._getCodebase(codebase);
     
-    const results = await metadata.searchKeyword(query, limit, searchContent);
+    let pathResults = await metadata.searchKeyword(query, limit * 2);
+    
+    let contentResults = [];
+    if (searchContent) {
+      try {
+        contentResults = await this.grepSearcher.grep(source, query, {
+          regex: false,
+          limit: limit * 2,
+          maxMatchesPerFile: 1,
+          caseSensitive: false,
+          excludeExtensions: [...BINARY_EXTENSIONS]
+        });
+      } catch {}
+    }
+    
+    const seen = new Set();
+    const merged = [];
+    
+    for (const r of pathResults) {
+      if (!seen.has(r.path)) {
+        seen.add(r.path);
+        merged.push({ path: r.path, rank: r.rank, contentMatches: null });
+      }
+    }
+    
+    for (const r of contentResults) {
+      if (!seen.has(r.path)) {
+        seen.add(r.path);
+        merged.push({ path: r.path, rank: -0.3, contentMatches: { line: r.line, content: r.content } });
+      } else {
+        const existing = merged.find(m => m.path === r.path);
+        if (existing && !existing.contentMatches) {
+          existing.contentMatches = { line: r.line, content: r.content };
+        }
+      }
+    }
+    
+    let results = merged;
+    if (filter?.excludeExtensions || filter?.includeExtensions) {
+      results = results.filter(r => _matchesExtension(r.path, filter));
+    }
+    results = results.slice(0, limit);
     
     return {
       results: results.map(r => ({
@@ -566,7 +594,8 @@ export class CodebaseIndexingService {
     maxMatchesPerFile = 5,
     caseSensitive = false,
     pathPattern = null,
-    noCache = false
+    noCache = false,
+    excludeExtensions = null
   }) {
     const { source } = await this._getCodebase(codebase);
     
@@ -576,7 +605,8 @@ export class CodebaseIndexingService {
       maxMatchesPerFile,
       caseSensitive,
       pathPattern,
-      noCache
+      noCache,
+      excludeExtensions: excludeExtensions || [...BINARY_EXTENSIONS]
     });
     
     return {
@@ -623,19 +653,22 @@ export class CodebaseIndexingService {
       }
     }
     
-    // Keyword search for 'hybrid' and 'keyword' strategies
     if (strategy === 'hybrid' || strategy === 'keyword') {
       const rawKeyword = await metadata.searchKeyword(query, limit * 2);
       keywordResults.push(...rawKeyword.map(r => ({ path: r.path, rank: r.rank })));
     }
     
-    // Grep for exact matches (only for short queries)
     if (strategy === 'hybrid' && query.length < 50 && !query.includes(' ')) {
       try {
         grepResults = await this.grepSearcher.grep(source, query, { regex: false, limit: 20 });
-      } catch {
-        // Grep optional - ignore errors
-      }
+        const existingKeywordPaths = new Set(keywordResults.map(r => r.path));
+        for (const g of grepResults) {
+          if (!existingKeywordPaths.has(g.path)) {
+            keywordResults.push({ path: g.path, rank: -0.5 });
+            existingKeywordPaths.add(g.path);
+          }
+        }
+      } catch {}
     }
     
     // Combine results
@@ -653,7 +686,13 @@ export class CodebaseIndexingService {
     
     // Apply filters
     if (filter?.language) {
-      combined = combined.filter(r => r.language === filter.language || !r.language);
+      const filterLang = filter.language.toLowerCase();
+      combined = combined.filter(r => 
+        (r.language && r.language.toLowerCase() === filterLang) || !r.language
+      );
+    }
+    if (filter?.excludeExtensions || filter?.includeExtensions) {
+      combined = combined.filter(r => _matchesExtension(r.path, filter));
     }
     
     // Limit results
@@ -693,7 +732,7 @@ export class CodebaseIndexingService {
     // Generate query embedding
     const queryEmbedding = await this.router.embedText(query);
 
-    // Search nDB
+    // Search nVDB
     const results = collection.search({
       vector: queryEmbedding,
       top_k: limit * 2, // Fetch extra for post-filtering
@@ -710,7 +749,10 @@ export class CodebaseIndexingService {
       if (!fileInfo) continue;
 
       // Apply filters
-      if (filter?.language && fileInfo.language !== filter.language) continue;
+      if (filter?.language && fileInfo.language?.toLowerCase() !== filter.language.toLowerCase()) continue;
+      if (filter?.excludeExtensions || filter?.includeExtensions) {
+        if (!_matchesExtension(match.id, filter)) continue;
+      }
 
       enriched.push({
         file: `${codebase}:${match.id}`,
@@ -759,7 +801,8 @@ export class CodebaseIndexingService {
           results = await this.searchKeyword({ 
             codebase: cb.name, 
             query, 
-            limit: searchLimit 
+            limit: searchLimit,
+            filter 
           });
         } else if (strategy === 'semantic') {
           results = await this.searchSemantic({ 
@@ -833,107 +876,7 @@ export class CodebaseIndexingService {
     };
   }
 
-  /**
-   * Analyze search results using local LLM to reduce token cost for calling LLM.
-   * Returns structured summary with key findings, relevant files, and implementation patterns.
-   */
-  async analyzeSearchResults(searchResults, query, searchType = 'search') {
-    if (!this.router) {
-      throw new Error('LLM router not available for analysis');
-    }
 
-    const results = searchResults.results || [];
-    if (results.length === 0) {
-      return { 
-        summary: 'No results found.', 
-        keyFindings: [], 
-        relevantFiles: [], 
-        implementationPatterns: [],
-        raw: 'No results to analyze.'
-      };
-    }
-
-    // Build context from search results
-    const context = results.map((r, i) => {
-      const parts = [
-        `Result ${i + 1}: ${r.file || r.path || 'unknown'}`,
-        r.score ? `Score: ${r.score.toFixed(3)}` : null,
-        r.language ? `Language: ${r.language}` : null,
-        r.functions?.length ? `Functions: ${r.functions.join(', ')}` : null,
-        r.classes?.length ? `Classes: ${r.classes.join(', ')}` : null,
-        r.line ? `Line ${r.line}: ${r.content || ''}` : null
-      ].filter(Boolean);
-      return parts.join('\n');
-    }).join('\n\n---\n\n');
-
-    const analysisPrompt = `You are analyzing code search results to extract key information. Be concise and structured.
-
-Search Query: "${query}"
-Search Type: ${searchType}
-Number of Results: ${results.length}
-
-Search Results:
-${context}
-
-Provide a structured analysis in this exact format:
-
-SUMMARY: (2-3 sentences describing what was found and how it relates to the query)
-
-KEY_FINDINGS:
-- (bullet point 1: specific implementation detail or pattern found)
-- (bullet point 2: another key finding)
-- (add more as relevant, max 5)
-
-RELEVANT_FILES:
-1. (filepath) - (why it's relevant in 5-8 words)
-2. (add more as relevant, max 5)
-
-IMPLEMENTATION_PATTERNS:
-- (pattern name): (brief description of how it's implemented)
-- (add more as found, max 3)`;
-
-    const analysis = await this.router.predict({
-      prompt: analysisPrompt,
-      temperature: 0.3,
-      taskType: 'analysis'
-    });
-
-    // Parse the analysis into structured format
-    const lines = analysis.trim().split('\n');
-    const parsed = {
-      summary: '',
-      keyFindings: [],
-      relevantFiles: [],
-      implementationPatterns: [],
-      raw: analysis.trim()
-    };
-
-    let section = null;
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith('SUMMARY:')) {
-        section = 'summary';
-        parsed.summary = trimmed.slice(8).trim();
-      } else if (trimmed.startsWith('KEY_FINDINGS:')) {
-        section = 'findings';
-      } else if (trimmed.startsWith('RELEVANT_FILES:')) {
-        section = 'files';
-      } else if (trimmed.startsWith('IMPLEMENTATION_PATTERNS:')) {
-        section = 'patterns';
-      } else if (trimmed.startsWith('- ') && section === 'findings') {
-        parsed.keyFindings.push(trimmed.slice(2));
-      } else if (/^\d+\./.test(trimmed) && section === 'files') {
-        parsed.relevantFiles.push(trimmed.replace(/^\d+\.\s*/, ''));
-      } else if (trimmed.startsWith('- ') && section === 'patterns') {
-        parsed.implementationPatterns.push(trimmed.slice(2));
-      } else if (section === 'summary' && !trimmed.startsWith('KEY_FINDINGS:')) {
-        parsed.summary += ' ' + trimmed;
-      }
-    }
-
-    parsed.summary = parsed.summary.trim();
-    return parsed;
-  }
 
   /**
    * Get file tree for a codebase
@@ -954,10 +897,10 @@ IMPLEMENTATION_PATTERNS:
       throw new Error(`File not found: ${filePath}`);
     }
 
-    // Get symbols from nDB payload
+    // Get symbols from nVDB payload
     let symbols = { functions: [], classes: [], imports: [] };
     try {
-      // nDB stores payload as JSON string - retrieve it via collection.get
+      // nVDB stores payload as JSON string - retrieve it via collection.get
       const doc = collection.get(filePath);
       if (doc && doc.payload) {
         const payload = JSON.parse(doc.payload);
@@ -1029,30 +972,26 @@ IMPLEMENTATION_PATTERNS:
    *
    * @param {Object} options
    * @param {string} options.codebase - Specific codebase to maintain (omit for all)
-   * @param {string} options.reindex - Reindex mode: "if_missing" (build if not exists), "changed" (update existing), "always" (rebuild), null (changed only if exists)
-   * @param {boolean} options.analyze - Run LLM analysis after indexing (default: false)
+   * @param {string} options.reindex - Reindex mode: "if_missing", "changed", "always", null
    */
-  async runMaintenance({ codebase, reindex, analyze = false } = {}) {
+  async runMaintenance({ codebase, reindex } = {}) {
     if (codebase) {
-      return this._runMaintenanceOnCodebase(codebase, reindex, analyze);
+      return this._runMaintenanceOnCodebase(codebase, reindex);
     } else {
-      // Run on all codebases from config + orphaned indexes
       const configCodebases = await this._getAllConfiguredCodebases();
       const indexedCodebases = await this.listCodebases();
       const indexedNames = new Set(indexedCodebases.map(cb => cb.name));
       const results = [];
 
-      // First, process orphaned indexes (indexed but not in config)
       for (const cb of indexedCodebases) {
         if (!configCodebases.has(cb.name)) {
-          const result = await this._runMaintenanceOnCodebase(cb.name, reindex, analyze);
+          const result = await this._runMaintenanceOnCodebase(cb.name, reindex);
           results.push(result);
         }
       }
 
-      // Then, process codebases in config
       for (const name of configCodebases) {
-        const result = await this._runMaintenanceOnCodebase(name, reindex, analyze);
+        const result = await this._runMaintenanceOnCodebase(name, reindex);
         results.push(result);
       }
 
@@ -1081,50 +1020,37 @@ IMPLEMENTATION_PATTERNS:
   /**
    * Run maintenance on a single codebase
    */
-  async _runMaintenanceOnCodebase(codebaseName, reindexMode, runAnalyze) {
+  async _runMaintenanceOnCodebase(codebaseName, reindexMode) {
     const codebases = await this.listCodebases();
     const indexedCodebase = codebases.find(cb => cb.name === codebaseName);
     const exists = !!indexedCodebase;
 
-    // Check if indexed codebase is still in config
     const configSource = await this._getCodebaseSourcePath(codebaseName);
     const orphaned = exists && !configSource;
 
     if (orphaned) {
-      // Indexed but not in config - move to trash
       const result = await this.removeCodebase({ name: codebaseName });
       return { codebase: codebaseName, action: 'orphaned_removed', ...result };
     }
 
-    // Determine action based on reindex mode
     if (!exists) {
       if (reindexMode === 'if_missing' || reindexMode === 'always' || reindexMode === true) {
-        // Need to index - get source path from codebases.json
         if (!configSource) {
           return { codebase: codebaseName, error: 'Codebase not found in configuration' };
         }
-        const result = await this.indexCodebase({ name: codebaseName, source: configSource, analyze: runAnalyze });
+        const result = await this.indexCodebase({ name: codebaseName, source: configSource });
         return { codebase: codebaseName, action: 'indexed', ...result };
       } else {
         return { codebase: codebaseName, error: 'Codebase not indexed. Use reindex:"if_missing" to build.' };
       }
     }
 
-    // Codebase exists and is in config - check for changes
     if (reindexMode === 'always') {
-      // Force rebuild
-      const result = await this.refreshCodebase({ name: codebaseName, analyze: runAnalyze });
+      const result = await this.refreshCodebase({ name: codebaseName });
       return { codebase: codebaseName, action: 'rebuilt', ...result };
     }
 
-    // Check for changes (default behavior)
     const changeResult = await this.maintenance.checkAndRefresh(codebaseName);
-
-    if (changeResult.refreshed && runAnalyze) {
-      // Changes detected and analyzed - run analysis
-      const analysisResult = await this.analyzeCodebase({ name: codebaseName });
-      return { codebase: codebaseName, action: 'refreshed_with_analysis', refresh: changeResult, analysis: analysisResult };
-    }
 
     return { codebase: codebaseName, action: changeResult.reason, ...changeResult };
   }
@@ -1153,7 +1079,7 @@ IMPLEMENTATION_PATTERNS:
   // ========== LLM Project Analysis ==========
 
   /**
-   * Analyze a codebase using LLM to generate description and identify key files
+   * Analyze a codebase using metadata heuristics to generate description and identify key files
    */
   async analyzeCodebase({ name }, onProgress) {
     const codebase = await this._getCodebase(name);
@@ -1163,16 +1089,15 @@ IMPLEMENTATION_PATTERNS:
       throw new Error(`Codebase '${name}' not found`);
     }
 
-    onProgress?.({ phase: 'analyzing', message: 'Starting LLM analysis...' });
+    onProgress?.({ phase: 'analyzing', message: 'Running heuristic analysis...' });
 
     const analysis = await analyzeProject(
-      this.router,
+      null,
       codebase.metadata,
       codebase.source,
       onProgress
     );
 
-    // Save analysis to metadata
     await this._saveCodebaseMetadata(name, {
       ...metadataRecord,
       llmAnalysis: analysis
@@ -1203,7 +1128,7 @@ IMPLEMENTATION_PATTERNS:
       return {
         name,
         hasAnalysis: false,
-        message: 'No LLM analysis available. Run analyze_codebase first.'
+        message: 'No analysis available. Run analyze_codebase first.'
       };
     }
 
@@ -1228,11 +1153,16 @@ IMPLEMENTATION_PATTERNS:
   /**
    * Get prioritized file list for search
    */
-  async getPrioritizedFiles({ name }) {
+  async getPrioritizedFiles({ name, filter }) {
     const codebase = await this._getCodebase(name);
     const metadata = await this._loadCodebaseMetadata(name);
     
-    const allFiles = (await codebase.metadata.getAllFiles()).map(f => f.path);
+    let allFiles = (await codebase.metadata.getAllFiles()).map(f => f.path);
+
+    if (filter?.excludeExtensions || filter?.includeExtensions) {
+      allFiles = allFiles.filter(f => _matchesExtension(f, filter));
+    }
+
     const prioritized = getPrioritizedFiles(metadata?.llmAnalysis, allFiles);
     
     return {
@@ -1265,15 +1195,14 @@ IMPLEMENTATION_PATTERNS:
             name: { type: 'string', description: 'Codebase name (e.g., "SoundApp")' },
             source: { type: 'string', description: 'Absolute path to source directory (alternative to space)' },
             space: { type: 'string', description: 'Space name from config (e.g., "COOLKID-Work") - resolves project path automatically' },
-            project: { type: 'string', description: 'Project folder name within space (defaults to codebase name if not specified)' },
-            analyze: { type: 'boolean', description: 'Run LLM analysis after indexing to generate project description (default: false)', default: false }
+            project: { type: 'string', description: 'Project folder name within space (defaults to codebase name if not specified)' }
           },
           required: ['name']
         }
       },
       {
         name: 'search_codebase',
-        description: 'Primary search tool for single codebase. RECOMMENDED over grep_codebase for most searches. Combines semantic (meaning) + keyword (exact) matching. Use strategy:keyword for fast name lookups, strategy:semantic for concept queries. Use analyze:true to get AI-summarized results (saves 50-90% tokens). Codebase name supports partial matching.',
+        description: 'Primary search tool for single codebase. RECOMMENDED over grep_codebase for most searches. Combines semantic (meaning) + keyword (exact) matching. Use strategy:keyword for fast name lookups, strategy:semantic for concept queries. Codebase name supports partial matching.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1283,17 +1212,19 @@ IMPLEMENTATION_PATTERNS:
             limit: { type: 'number', default: 10 },
             filter: { 
               type: 'object',
-              properties: { language: { type: 'string' } }
-            },
-            analyze: { type: 'boolean', default: false, description: 'Use local LLM to analyze results and return structured summary with keyFindings, relevantFiles, implementationPatterns. Saves 50-90% tokens vs raw results. Recommended for exploration.' },
-            includeRaw: { type: 'boolean', default: false, description: 'Include raw search results in addition to analysis. Use when you want both the AI summary AND original snippets for drilling down.' }
+              properties: {
+                language: { type: 'string' },
+                excludeExtensions: { type: 'array', items: { type: 'string' }, description: 'File extensions to exclude, e.g. [".png", ".svg"]' },
+                includeExtensions: { type: 'array', items: { type: 'string' }, description: 'Only include these extensions, e.g. [".js", ".ts"]' }
+              }
+            }
           },
           required: ['codebase', 'query']
         }
       },
       {
         name: 'search_semantic',
-        description: 'Semantic (AI embedding) search - finds conceptually similar code. Best for: "how is X implemented?", "find code that does Y", pattern discovery. Slower than keyword but understands meaning, not just text. Use analyze:true for structured summary. Codebase name supports partial matching.',
+        description: 'Semantic (AI embedding) search - finds conceptually similar code. Best for: "how is X implemented?", "find code that does Y", pattern discovery. Slower than keyword but understands meaning, not just text. Codebase name supports partial matching.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1302,17 +1233,19 @@ IMPLEMENTATION_PATTERNS:
             limit: { type: 'number', default: 10 },
             filter: { 
               type: 'object',
-              properties: { language: { type: 'string' } }
-            },
-            analyze: { type: 'boolean', default: false, description: 'Use local LLM to analyze results and return structured summary with keyFindings, relevantFiles, implementationPatterns. Saves 50-90% tokens vs raw results. Recommended for exploration.' },
-            includeRaw: { type: 'boolean', default: false, description: 'Include raw search results in addition to analysis. Use when you want both the AI summary AND original snippets for drilling down.' }
+              properties: {
+                language: { type: 'string' },
+                excludeExtensions: { type: 'array', items: { type: 'string' }, description: 'File extensions to exclude, e.g. [".png", ".svg"]' },
+                includeExtensions: { type: 'array', items: { type: 'string' }, description: 'Only include these extensions, e.g. [".js", ".ts"]' }
+              }
+            }
           },
           required: ['codebase', 'query']
         }
       },
       {
         name: 'search_keyword',
-        description: 'FAST indexed keyword search. Best for: exact function names, class names, variable names, imports. Searches file paths AND content. Much faster than grep_codebase (<100ms vs 1-3s). Use this INSTEAD of grep_codebase when searching for specific identifiers. Use analyze:true for AI summary. Codebase name supports partial matching.',
+        description: 'FAST indexed keyword search. Best for: exact function names, class names, variable names, imports. Searches file paths AND content. Much faster than grep_codebase (<100ms vs 1-3s). Use this INSTEAD of grep_codebase when searching for specific identifiers. Codebase name supports partial matching.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1320,15 +1253,20 @@ IMPLEMENTATION_PATTERNS:
             query: { type: 'string', description: 'Keywords to search (function names, class names, etc.)' },
             limit: { type: 'number', default: 20 },
             searchContent: { type: 'boolean', default: true, description: 'Search file content (not just paths). Slightly slower but more thorough.' },
-            analyze: { type: 'boolean', default: false, description: 'Use local LLM to analyze results and return structured summary (reduces token cost for calling LLM)' },
-            includeRaw: { type: 'boolean', default: false, description: 'Include raw search results in addition to analysis (increases token usage)' }
+            filter: { 
+              type: 'object',
+              properties: {
+                excludeExtensions: { type: 'array', items: { type: 'string' }, description: 'File extensions to exclude, e.g. [".png", ".svg"]' },
+                includeExtensions: { type: 'array', items: { type: 'string' }, description: 'Only include these extensions, e.g. [".js", ".ts"]' }
+              }
+            }
           },
           required: ['codebase', 'query']
         }
       },
       {
         name: 'grep_codebase',
-        description: 'Live regex search using ripgrep. ALWAYS CURRENT (searches filesystem directly). Use ONLY when: (1) You need regex patterns like "function.*predict\\(", (2) You need exact line numbers for editing, (3) You suspect index is stale. OTHERWISE prefer search_keyword (faster for names) or search_semantic (for concepts). Slower than indexed search (1-3s vs <200ms). Use analyze:true to get structured analysis. Codebase name supports partial matching.',
+        description: 'Live regex search using ripgrep. ALWAYS CURRENT (searches filesystem directly). Use ONLY when: (1) You need regex patterns, (2) You need exact line numbers for editing, (3) You suspect index is stale. OTHERWISE prefer search_keyword (faster for names) or search_semantic (for concepts). Codebase name supports partial matching.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1340,15 +1278,14 @@ IMPLEMENTATION_PATTERNS:
             caseSensitive: { type: 'boolean', default: false, description: 'Case-sensitive search' },
             pathPattern: { type: 'string', description: 'Filter by file path glob (e.g., "*.js", "src/**")' },
             noCache: { type: 'boolean', default: false, description: 'Skip cache and force fresh search' },
-            analyze: { type: 'boolean', default: false, description: 'Use local LLM to analyze results and return structured summary with keyFindings, relevantFiles, implementationPatterns. Saves 50-90% tokens vs raw results.' },
-            includeRaw: { type: 'boolean', default: false, description: 'Include raw search results in addition to analysis. Use when you want both the AI summary AND original snippets for drilling down.' }
+            excludeExtensions: { type: 'array', items: { type: 'string' }, description: 'File extensions to exclude, e.g. [".png", ".svg"]. Binary files auto-excluded by default.' }
           },
           required: ['codebase', 'pattern']
         }
       },
       {
         name: 'search_all_codebases',
-        description: '[RECOMMENDED] Search across ALL indexed codebases at once. Perfect for finding "how is X implemented across different projects?" Strategies: hybrid (default, best overall), semantic (conceptual), keyword (fast exact match). AVOID strategy:grep unless you need regex - it is 10x slower. Use analyze:true (strongly recommended) to get AI-summarized insights instead of 50+ raw snippets (saves 50-90% tokens).',
+        description: 'Search across ALL indexed codebases at once. Strategies: hybrid (default, best overall), semantic (conceptual), keyword (fast exact match). AVOID strategy:grep unless you need regex - it is 10x slower. Codebase name supports partial matching.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1359,10 +1296,12 @@ IMPLEMENTATION_PATTERNS:
             concurrency: { type: 'number', default: 10, description: 'Number of codebases to search in parallel' },
             filter: { 
               type: 'object',
-              properties: { language: { type: 'string' } }
-            },
-            analyze: { type: 'boolean', default: false, description: 'Use local LLM to analyze results and return structured summary with keyFindings, relevantFiles, implementationPatterns. Saves 50-90% tokens vs raw results. STRONGLY RECOMMENDED for cross-codebase exploration.' },
-            includeRaw: { type: 'boolean', default: false, description: 'Include raw search results in addition to analysis. Use when you want both the AI summary AND original snippets for drilling down.' }
+              properties: {
+                language: { type: 'string' },
+                excludeExtensions: { type: 'array', items: { type: 'string' }, description: 'File extensions to exclude, e.g. [".png", ".svg"]' },
+                includeExtensions: { type: 'array', items: { type: 'string' }, description: 'Only include these extensions, e.g. [".js", ".ts"]' }
+              }
+            }
           },
           required: ['query']
         }
@@ -1397,8 +1336,7 @@ IMPLEMENTATION_PATTERNS:
         inputSchema: {
           type: 'object',
           properties: {
-            name: { type: 'string' },
-            analyze: { type: 'boolean', description: 'Re-run LLM analysis if stale (default: false)', default: false }
+            name: { type: 'string' }
           },
           required: ['name']
         }
@@ -1443,7 +1381,8 @@ IMPLEMENTATION_PATTERNS:
         inputSchema: {
           type: 'object',
           properties: {
-            codebase: { type: 'string', description: 'Specific codebase to refresh, or omit for all' }
+            codebase: { type: 'string', description: 'Specific codebase to refresh, or omit for all' },
+            reindex: { type: 'string', description: 'Reindex mode: "if_missing" (build if not exists), "changed" (update existing), "always" (rebuild)' }
           }
         }
       },
@@ -1454,7 +1393,7 @@ IMPLEMENTATION_PATTERNS:
       },
       {
         name: 'analyze_codebase',
-        description: 'Run LLM analysis to generate project description and identify key files. Codebase name supports partial matching.',
+        description: 'Run heuristic analysis to generate project description and identify key files. No LLM required - uses metadata patterns. Codebase name supports partial matching.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1465,7 +1404,7 @@ IMPLEMENTATION_PATTERNS:
       },
       {
         name: 'get_codebase_description',
-        description: 'Get LLM-generated project description with staleness check. Codebase name supports partial matching.',
+        description: 'Get project description with staleness check. Codebase name supports partial matching.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1480,7 +1419,14 @@ IMPLEMENTATION_PATTERNS:
         inputSchema: {
           type: 'object',
           properties: {
-            name: { type: 'string', description: 'Codebase name (partial match supported)' }
+            name: { type: 'string', description: 'Codebase name (partial match supported)' },
+            filter: {
+              type: 'object',
+              properties: {
+                excludeExtensions: { type: 'array', items: { type: 'string' }, description: 'File extensions to exclude, e.g. [".png", ".svg"]' },
+                includeExtensions: { type: 'array', items: { type: 'string' }, description: 'Only include these extensions, e.g. [".js", ".ts"]' }
+              }
+            }
           },
           required: ['name']
         }
@@ -1543,37 +1489,7 @@ IMPLEMENTATION_PATTERNS:
       throw new Error(`Unknown tool: ${name}`);
     }
     
-    // Extract analyze flag before passing to method
-    const shouldAnalyze = args.analyze === true;
-    const methodArgs = { ...args };
-    delete methodArgs.analyze;
-    
-    const result = await this[methodName](methodArgs);
-    
-    // Post-process with LLM analysis if requested (for search tools)
-    const searchTools = ['search_codebase', 'search_semantic', 'search_keyword', 'search_all_codebases', 'grep_codebase'];
-    if (shouldAnalyze && searchTools.includes(name)) {
-      try {
-        // grep_codebase uses 'pattern' instead of 'query'
-        const searchQuery = args.query || args.pattern || 'unknown query';
-        const analysis = await this.analyzeSearchResults(result, searchQuery, name);
-        const combined = {
-          analysis,
-          stats: {
-            resultCount: result.count ?? result.totalCount ?? 0,
-            searchType: name,
-            originalQuery: searchQuery
-          },
-          // Include raw results only if explicitly requested (for token efficiency)
-          ...(args.includeRaw ? { rawResults: result.results || result } : {})
-        };
-        return { content: [{ type: 'text', text: JSON.stringify(combined, null, 2) }] };
-      } catch (err) {
-        // If analysis fails, return original result with error note
-        result._analysisError = err.message;
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      }
-    }
+    const result = await this[methodName](args);
     
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }

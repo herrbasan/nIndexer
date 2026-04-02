@@ -1,3 +1,4 @@
 [submodule "nVDB"]
 	path = nVDB
 	url = https://github.com/herrbasan/nVDB.git
+	branch = master

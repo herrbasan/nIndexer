@@ -69,8 +69,9 @@ export class CodebaseMaintenance {
     const startTime = Date.now();
     
     try {
+      const t0 = Date.now();
       const codebases = await this.service.listCodebases();
-      console.log(`[CodebaseMaintenance] Checking ${codebases.length} codebases...`);
+      console.log(`[Maintenance:perf] listCodebases: ${Date.now() - t0}ms (${codebases.length} codebases)`);
 
       for (const cb of codebases) {
         if (cb.status === 'indexing') {
@@ -79,8 +80,12 @@ export class CodebaseMaintenance {
         }
 
         try {
+          const cbStart = Date.now();
           const result = await this.checkAndRefresh(cb.name);
-          if (result.refreshed) {
+          const cbDuration = Date.now() - cbStart;
+          if (cbDuration > 1000) {
+            console.log(`[Maintenance:perf] ${cb.name}: ${cbDuration}ms (refreshed=${result.refreshed}, reason=${result.reason})`);
+          } else if (result.refreshed) {
             console.log(`[CodebaseMaintenance] Refreshed ${cb.name}: ${result.filesUpdated} files updated`);
           }
         } catch (err) {
@@ -93,7 +98,7 @@ export class CodebaseMaintenance {
       this.lastRun = new Date().toISOString();
       
       const duration = Date.now() - startTime;
-      console.log(`[CodebaseMaintenance] Complete in ${duration}ms`);
+      console.log(`[Maintenance:perf] Full cycle: ${duration}ms`);
       
     } catch (err) {
       console.error('[CodebaseMaintenance] Failed:', err.message);
@@ -107,27 +112,35 @@ export class CodebaseMaintenance {
    * Check if codebase needs refresh and update if needed
    */
   async checkAndRefresh(codebaseName) {
+    const totalStart = Date.now();
+    
+    const t0 = Date.now();
     const codebase = await this.service._getCodebase(codebaseName);
     const metadata = await this.service._loadCodebaseMetadata(codebaseName);
+    const loadTime = Date.now() - t0;
     
     if (!metadata) {
       return { refreshed: false, reason: 'no_metadata' };
     }
 
     // Scan current files
+    const t1 = Date.now();
     const currentFiles = new Map();
     await this._scanDirectory(metadata.source, metadata.source, currentFiles);
+    const scanTime = Date.now() - t1;
 
     // Get indexed files
+    const t2 = Date.now();
     const indexedFiles = await codebase.metadata.getAllFiles();
     const indexedMap = new Map(indexedFiles.map(f => [f.path, f]));
+    const loadIndexedTime = Date.now() - t2;
 
     // Find changes
+    const t3 = Date.now();
     const toUpdate = [];
     const toDelete = [];
     const toAdd = [];
 
-    // Check for new and modified files
     for (const [path, fileInfo] of currentFiles) {
       const indexed = indexedMap.get(path);
       if (!indexed) {
@@ -137,14 +150,19 @@ export class CodebaseMaintenance {
       }
     }
 
-    // Check for deleted files
     for (const [path] of indexedMap) {
-      if (!currentFiles.has(path)) {
+      if (!currentFiles.has(path) || this._shouldIgnore(path, false)) {
         toDelete.push(path);
       }
     }
+    const diffTime = Date.now() - t3;
 
     const totalChanges = toAdd.length + toUpdate.length + toDelete.length;
+    
+    const totalTime = Date.now() - totalStart;
+    if (totalTime > 500 || totalChanges > 0) {
+      console.log(`[Maintenance:perf] checkAndRefresh(${codebaseName}): ${totalTime}ms (load=${loadTime}ms, scan=${scanTime}ms, loadIndexed=${loadIndexedTime}ms, diff=${diffTime}ms) found: +${toAdd.length} ~${toUpdate.length} -${toDelete.length}`);
+    }
     
     if (totalChanges === 0) {
       return { refreshed: false, reason: 'up_to_date' };
@@ -159,14 +177,17 @@ export class CodebaseMaintenance {
     }
 
     // Run incremental refresh
+    const refreshStart = Date.now();
     console.log(`[CodebaseMaintenance] ${codebaseName}: ${toAdd.length} added, ${toUpdate.length} updated, ${toDelete.length} deleted`);
     
-    await this.service.refreshCodebase({ name: codebaseName, analyze: true }, (progress) => {
-      // Silent progress - only log errors
+    await this.service.refreshCodebase({ name: codebaseName }, (progress) => {
       if (progress.phase === 'error') {
         console.error(`[CodebaseMaintenance] ${codebaseName}: ${progress.message}`);
       }
     });
+
+    const refreshTime = Date.now() - refreshStart;
+    console.log(`[Maintenance:perf] ${codebaseName} refresh: ${refreshTime}ms`);
 
     this.stats.filesUpdated += totalChanges;
 
@@ -252,8 +273,6 @@ export class CodebaseMaintenance {
    * Only tracks code files that would be indexed (same as indexer)
    */
   async _scanDirectory(basePath, currentPath, files) {
-    // Extensions that the indexer processes
-    const CODE_EXTENSIONS = new Set(['.js', '.ts', '.jsx', '.tsx', '.py', '.rs', '.java', '.go', '.c', '.cpp', '.h', '.cs', '.rb', '.php']);
     const entries = await fs.readdir(currentPath, { withFileTypes: true }).catch(() => []);
 
     for (const entry of entries) {
@@ -266,10 +285,6 @@ export class CodebaseMaintenance {
         }
       } else if (entry.isFile()) {
         if (!this._shouldIgnore(relativePath, false)) {
-          // Only track code files (same logic as indexer)
-          const ext = path.extname(entry.name).toLowerCase();
-          if (!CODE_EXTENSIONS.has(ext)) continue;
-          
           const stats = await fs.stat(fullPath).catch(() => null);
           const maxSize = this.service.config?.maxFileSize || 1024 * 1024;
           if (stats && stats.size <= maxSize) {

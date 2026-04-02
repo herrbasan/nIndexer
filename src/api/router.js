@@ -41,7 +41,6 @@ const METHOD_MAP = {
 const PROGRESSABLE_METHODS = new Set([
   'index_codebase',
   'refresh_codebase',
-  'analyze_codebase',
   'run_maintenance'
 ]);
 
@@ -254,7 +253,7 @@ export function createRouter(indexingService) {
     try {
       // Bind the progress callback as the second argument for methods that need it
       let result;
-      if (onProgress && ['indexCodebase', 'refreshCodebase', 'analyzeCodebase', 'runMaintenance'].includes(serviceMethod)) {
+      if (onProgress && ['indexCodebase', 'refreshCodebase', 'runMaintenance'].includes(serviceMethod)) {
         result = await service[serviceMethod](params, onProgress);
       } else {
         result = await service[serviceMethod](params);

@@ -2,7 +2,7 @@
  * Search Router - Coordinates semantic and keyword search
  * 
  * Currently a thin wrapper since:
- * - Semantic search: handled by nDB
+ * - Semantic search: handled by nVDB
  * - Keyword search: handled by SQLite FTS5
  * - Hybrid ranking: combines both scores
  */
@@ -12,7 +12,7 @@ export class SearchRouter {
    * Combine semantic and keyword results
    * 
    * Scoring:
-   * - Semantic score: 0-1 from nDB (higher is better)
+   * - Semantic score: 0-1 from nVDB (higher is better)
    * - Keyword score: 0-1 from FTS5 rank (converted)
    * - Combined: weighted sum (default 0.7 semantic, 0.3 keyword)
    */

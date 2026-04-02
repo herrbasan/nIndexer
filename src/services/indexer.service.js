@@ -37,7 +37,8 @@ const BINARY_EXTENSIONS = new Set([
   '.pyc', '.pyo', '.pyd',
   '.d.ts', // TypeScript declarations are just metadata
   '.min.js', '.min.css', // minified files
-  '.lock', '.log' // lock files and logs
+  '.lock', '.log',
+  '.ndb', '.reg', '.wal', '.idx'
 ]);
 
 export class Indexer {
@@ -51,24 +52,26 @@ export class Indexer {
     this.cancelled = true;
   }
 
-  /**
-   * Index a directory with batch processing
-   */
   async indexDirectory({ source, collection, metadata, incremental = false, onProgress }) {
     const startTime = Date.now();
     this.cancelled = false;
     
     // Get existing files if incremental
+    const t0 = Date.now();
     const existingFiles = incremental 
       ? new Map((await metadata.getAllFiles()).map(f => [f.path, f]))
       : new Map();
+    console.log(`[Indexer:perf] Phase 0 - Load existing files: ${Date.now() - t0}ms (${existingFiles.size} existing)`);
 
     // Walk directory
+    const t1 = Date.now();
     onProgress?.({ phase: 'scanning', message: 'Scanning files...' });
     const filesToIndex = [];
     await this._walkDirectory(source, source, filesToIndex);
+    console.log(`[Indexer:perf] Phase 0 - Walk directory: ${Date.now() - t1}ms (${filesToIndex.length} files found)`);
 
     // Determine what to index
+    const t2 = Date.now();
     const toIndex = [];
     const toDelete = [];
 
@@ -87,10 +90,10 @@ export class Indexer {
       }
     }
 
-    // Remaining existing files were deleted
     for (const [p] of existingFiles) {
       toDelete.push(p);
     }
+    console.log(`[Indexer:perf] Phase 0 - Diff calculation: ${Date.now() - t2}ms (toIndex=${toIndex.length}, toDelete=${toDelete.length})`);
 
     const totalFiles = toIndex.length;
     onProgress?.({ 
@@ -101,22 +104,29 @@ export class Indexer {
     });
 
     // Delete removed files
-    for (const filePath of toDelete) {
-      await metadata.deleteFile(filePath);
-      try {
-        collection.delete(filePath);
-      } catch {
-        // May not exist in collection
+    if (toDelete.length > 0) {
+      const t3 = Date.now();
+      for (const filePath of toDelete) {
+        metadata.stageDelete(filePath);
+        try {
+          collection.delete(filePath);
+        } catch {
+          // May not exist in collection
+        }
       }
+      await metadata.commit();
+      console.log(`[Indexer:perf] Phase 0 - Delete ${toDelete.length} removed files: ${Date.now() - t3}ms`);
     }
 
     if (totalFiles === 0) {
-      return { indexed: 0, errors: 0, duration: Date.now() - startTime, errorsDetail: [] };
+      const totalDuration = Date.now() - startTime;
+      console.log(`[Indexer:perf] Total: ${totalDuration}ms (nothing to index)`);
+      return { indexed: 0, errors: 0, duration: totalDuration, errorsDetail: [], timing: { totalMs: totalDuration } };
     }
 
     // Process files in batches for embeddings
-    const EMBED_BATCH_SIZE = 25;  // LM Studio handles 25 well
-    const DB_BATCH_SIZE = 50;     // nDB insert batch
+    const EMBED_BATCH_SIZE = 25;
+    const DB_BATCH_SIZE = 50;
     
     let indexed = 0;
     const errors = [];
@@ -124,20 +134,37 @@ export class Indexer {
     let lastProgressTime = Date.now();
 
     // Phase 1: Parse all files and prepare embedding texts
+    const phase1Start = Date.now();
     const parsedFiles = [];
+    let parseReadTime = 0;
+    let parseHashTime = 0;
+    let parseRegexTime = 0;
+    let parseEmbedPrepTime = 0;
+    let parseBinarySkip = 0;
+    let parseFileReadCount = 0;
+    
     for (let i = 0; i < toIndex.length; i++) {
       const fileInfo = toIndex[i];
       
       try {
-        const parsed = await this._parseFile(fileInfo);
-        if (parsed) {
-          parsedFiles.push({ ...fileInfo, ...parsed });
+        if (fileInfo.isBinary) {
+          parseBinarySkip++;
+          parsedFiles.push({ ...fileInfo, hash: null, content: null, symbols: { functions: [], classes: [], imports: [] }, embeddingText: fileInfo.relativePath });
+        } else {
+          parseFileReadCount++;
+          const pr = await this._parseFileTimed(fileInfo);
+          parseReadTime += pr.readTime;
+          parseHashTime += pr.hashTime;
+          parseRegexTime += pr.regexTime;
+          parseEmbedPrepTime += pr.embedPrepTime;
+          if (pr.result) {
+            parsedFiles.push({ ...fileInfo, ...pr.result });
+          }
         }
       } catch (err) {
         errors.push({ file: fileInfo.relativePath, error: err.message });
       }
       
-      // Progress every 50 files during parsing
       if ((i + 1) % 50 === 0) {
         onProgress?.({
           phase: 'parsing',
@@ -147,17 +174,34 @@ export class Indexer {
         });
       }
     }
+    const phase1Duration = Date.now() - phase1Start;
+    console.log(`[Indexer:perf] Phase 1 - Parsing (${parsedFiles.length} files, ${parseBinarySkip} binary, ${parseFileReadCount} read): ${phase1Duration}ms`);
+    console.log(`[Indexer:perf]   readFile: ${parseReadTime}ms, hash: ${parseHashTime}ms, regex: ${parseRegexTime}ms, embedPrep: ${parseEmbedPrepTime}ms`);
 
-    // Phase 2: Batch generate embeddings
+    const embeddableFiles = parsedFiles.filter(p => p.content && p.content.trim().length >= 50);
+    const noiseFiles = parsedFiles.filter(p => !p.content || p.content.trim().length < 50);
+    if (noiseFiles.length > 0) {
+      console.log(`[Indexer:perf] Noise filter: ${noiseFiles.length} files skipped from embedding (binary/empty/small)`);
+    }
+
+    // Phase 2: Batch generate embeddings (only for content-bearing files)
+    const phase2Start = Date.now();
     const embeddings = [];
-    for (let i = 0; i < parsedFiles.length; i += EMBED_BATCH_SIZE) {
+    let embedBatchCount = 0;
+    let embedTotalServerTime = 0;
+    
+    for (let i = 0; i < embeddableFiles.length; i += EMBED_BATCH_SIZE) {
       if (this.cancelled) throw new Error('Indexing cancelled');
       
-      const batch = parsedFiles.slice(i, i + EMBED_BATCH_SIZE);
+      const batch = embeddableFiles.slice(i, i + EMBED_BATCH_SIZE);
       const texts = batch.map(p => p.embeddingText);
       
       try {
+        const bt0 = Date.now();
         const vectors = await this.router.embedBatch(texts);
+        const bt1 = Date.now();
+        embedBatchCount++;
+        embedTotalServerTime += (bt1 - bt0);
         
         for (let j = 0; j < batch.length; j++) {
           embeddings.push({
@@ -166,10 +210,11 @@ export class Indexer {
           });
         }
       } catch (err) {
-        // Fall back to individual embedding on batch failure
         for (const item of batch) {
           try {
+            const bt0 = Date.now();
             const vector = await this.router.embedText(item.embeddingText);
+            embedTotalServerTime += (Date.now() - bt0);
             embeddings.push({ ...item, vector });
           } catch (e) {
             errors.push({ file: item.relativePath, error: e.message });
@@ -177,22 +222,30 @@ export class Indexer {
         }
       }
       
-      // Progress during embedding
       const now = Date.now();
-      if (now - lastProgressTime > 500) {  // Update every 500ms
+      if (now - lastProgressTime > 500) {
         const rate = embeddings.length / ((now - startTime) / 1000);
         onProgress?.({
           phase: 'embedding',
           total: totalFiles,
-          current: Math.min(i + EMBED_BATCH_SIZE, parsedFiles.length),
-          message: `Embedded ${Math.min(i + EMBED_BATCH_SIZE, parsedFiles.length)}/${parsedFiles.length} files (${rate.toFixed(1)}/s)`,
+          current: Math.min(i + EMBED_BATCH_SIZE, embeddableFiles.length),
+          message: `Embedded ${Math.min(i + EMBED_BATCH_SIZE, embeddableFiles.length)}/${embeddableFiles.length} files (${rate.toFixed(1)}/s)`,
           rate
         });
         lastProgressTime = now;
       }
     }
+    const phase2Duration = Date.now() - phase2Start;
+    console.log(`[Indexer:perf] Phase 2 - Embedding (${embeddings.length} files, ${embedBatchCount} batches): ${phase2Duration}ms (server: ${embedTotalServerTime}ms)`);
 
-    // Phase 3: Batch insert into nDB and SQLite
+    // Phase 3: Batch insert into nVDB and SQLite
+    const phase3Start = Date.now();
+    let nvdbInsertTime = 0;
+    let metaSaveTime = 0;
+    let metaJsonSerializeTime = 0;
+    let metaJsonWriteTime = 0;
+    let contentIndexTime = 0;
+    
     for (let i = 0; i < embeddings.length; i += DB_BATCH_SIZE) {
       if (this.cancelled) throw new Error('Indexing cancelled');
       
@@ -200,7 +253,7 @@ export class Indexer {
       
       for (const item of batch) {
         try {
-          // nDB insert
+          const nvdb0 = Date.now();
           collection.insert(item.relativePath, item.vector, JSON.stringify({
             path: item.relativePath,
             language: this._getLanguage(item.ext),
@@ -209,15 +262,13 @@ export class Indexer {
             classes: item.symbols.classes,
             imports: item.symbols.imports
           }));
+          nvdbInsertTime += Date.now() - nvdb0;
           
-          // SQLite metadata
-          await metadata.saveFile(item.relativePath, {
+          metadata.stageFile(item.relativePath, {
             mtime: item.mtime,
             size: item.size,
             hash: item.hash,
-            language: this._getLanguage(item.ext),
-            content: item.content,
-            symbols: item.symbols
+            language: this._getLanguage(item.ext)
           });
           
           indexed++;
@@ -226,9 +277,12 @@ export class Indexer {
         }
       }
       
+      const commit0 = Date.now();
+      await metadata.commit();
+      metaSaveTime += Date.now() - commit0;
+      
       processedCount += batch.length;
       
-      // Progress
       const now = Date.now();
       const rate = processedCount / ((now - startTime) / 1000);
       onProgress?.({
@@ -239,25 +293,56 @@ export class Indexer {
         rate
       });
     }
-
-    const duration = Date.now() - startTime;
+    
+    const phase3Duration = Date.now() - phase3Start;
+    console.log(`[Indexer:perf] Phase 3 - Storage (${indexed} files): ${phase3Duration}ms`);
+    console.log(`[Indexer:perf]   nVDB insert: ${nvdbInsertTime}ms, metadata.saveFile: ${metaSaveTime}ms`);
+    
+    if (noiseFiles.length > 0) {
+      const noiseStart = Date.now();
+      for (const nf of noiseFiles) {
+        metadata.stageFile(nf.relativePath, {
+          mtime: nf.mtime,
+          size: nf.size,
+          hash: nf.hash,
+          language: this._getLanguage(nf.ext)
+        });
+      }
+      await metadata.commit();
+      indexed += noiseFiles.length;
+      console.log(`[Indexer:perf] Noise files: stored ${noiseFiles.length} in metadata only (${Date.now() - noiseStart}ms)`);
+    }
+    
+    const totalDuration = Date.now() - startTime;
+    console.log(`[Indexer:perf] TOTAL: ${totalDuration}ms (rate: ${(indexed / (totalDuration / 1000)).toFixed(1)}/s)`);
     
     return {
       indexed,
       errors: errors.length,
-      duration,
-      errorsDetail: errors.slice(0, 10),  // First 10 errors
-      rate: indexed / (duration / 1000)
+      duration: totalDuration,
+      errorsDetail: errors.slice(0, 10),
+      rate: indexed / (totalDuration / 1000),
+      timing: {
+        totalMs: totalDuration,
+        existingFilesMs: t1 - t0,
+        walkMs: t2 - t1,
+        diffMs: Date.now() - t2 - (toDelete.length > 0 ? 0 : 0),
+        phase1ParseMs: phase1Duration,
+        phase2EmbedMs: phase2Duration,
+        phase3StoreMs: phase3Duration,
+        nvdbInsertMs: nvdbInsertTime,
+        metadataSaveMs: metaSaveTime,
+        parseReadMs: parseReadTime,
+        parseHashMs: parseHashTime,
+        parseRegexMs: parseRegexTime,
+        embedServerMs: embedTotalServerTime
+      }
     };
   }
 
-  /**
-   * Parse a single file (no embedding yet)
-   */
   async _parseFile(fileInfo) {
     const { fullPath, relativePath, mtime, size, ext, isBinary } = fileInfo;
 
-    // For binary files, skip reading content - index by name/path only
     if (isBinary) {
       return {
         relativePath,
@@ -267,7 +352,7 @@ export class Indexer {
         hash: null,
         content: null,
         symbols: { functions: [], classes: [], imports: [] },
-        embeddingText: relativePath // Just the path for binary files
+        embeddingText: relativePath
       };
     }
 
@@ -288,6 +373,41 @@ export class Indexer {
       content,
       symbols,
       embeddingText
+    };
+  }
+
+  async _parseFileTimed(fileInfo) {
+    const { fullPath, relativePath, mtime, size, ext } = fileInfo;
+
+    const r0 = Date.now();
+    const content = await fs.readFile(fullPath, 'utf-8');
+    const readTime = Date.now() - r0;
+
+    const h0 = Date.now();
+    const hash = createHash('md5').update(content).digest('hex');
+    const hashTime = Date.now() - h0;
+
+    const x0 = Date.now();
+    const parser = PARSERS[ext];
+    const symbols = parser ? parser(content) : { functions: [], classes: [], imports: [] };
+    const regexTime = Date.now() - x0;
+
+    const e0 = Date.now();
+    const embeddingText = this._prepareEmbeddingText(relativePath, content, symbols);
+    const embedPrepTime = Date.now() - e0;
+
+    return {
+      readTime, hashTime, regexTime, embedPrepTime,
+      result: {
+        relativePath,
+        mtime,
+        size,
+        ext,
+        hash,
+        content,
+        symbols,
+        embeddingText
+      }
     };
   }
 

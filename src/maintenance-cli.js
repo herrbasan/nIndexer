@@ -30,8 +30,7 @@ async function main() {
   console.log('[Maintenance] Running initial maintenance...');
 
   const result = await indexingService.runMaintenance({
-    reindex: 'if_missing',
-    analyze: true
+    reindex: 'if_missing'
   });
 
   console.log('[Maintenance] Initial result:', JSON.stringify(result, null, 2));
