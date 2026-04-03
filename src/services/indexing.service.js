@@ -1092,7 +1092,7 @@ export class CodebaseIndexingService {
     onProgress?.({ phase: 'analyzing', message: 'Running heuristic analysis...' });
 
     const analysis = await analyzeProject(
-      null,
+      this.router, // pass the LLM router down!
       codebase.metadata,
       codebase.source,
       onProgress
@@ -1153,7 +1153,7 @@ export class CodebaseIndexingService {
   /**
    * Get prioritized file list for search
    */
-  async getPrioritizedFiles({ name, filter }) {
+  async getPrioritizedFiles({ name, asTree = true, filter }) {
     const codebase = await this._getCodebase(name);
     const metadata = await this._loadCodebaseMetadata(name);
     
@@ -1161,6 +1161,41 @@ export class CodebaseIndexingService {
 
     if (filter?.excludeExtensions || filter?.includeExtensions) {
       allFiles = allFiles.filter(f => _matchesExtension(f, filter));
+    }
+
+    if (asTree) {
+      // Build a simple tree string to return to LLM
+      const treeObj = {};
+      for (const p of allFiles) {
+        const parts = p.split('/');
+        let current = treeObj;
+        for (let i = 0; i < parts.length; i++) {
+          const part = parts[i];
+          if (!current[part]) current[part] = (i === parts.length - 1) ? null : {};
+          current = current[part];
+        }
+      }
+
+      const stringifyTree = (node, indent = '') => {
+        let lines = [];
+        for (const [key, val] of Object.entries(node)) {
+          if (val === null) {
+            lines.push(`${indent}📄 ${key}`);
+          } else {
+            lines.push(`${indent}📁 ${key}/`);
+            lines.push(...stringifyTree(val, indent + '  '));
+          }
+        }
+        return lines;
+      };
+
+      const treeString = stringifyTree(treeObj).join('\n');
+      return {
+        name,
+        totalFiles: allFiles.length,
+        tree: treeString,
+        prioritized: { high: [], medium: [], low: allFiles } // Keep legacy structure just in case existing clients expect it
+      };
     }
 
     const prioritized = getPrioritizedFiles(metadata?.llmAnalysis, allFiles);
@@ -1307,6 +1342,18 @@ export class CodebaseIndexingService {
         }
       },
       {
+        name: 'get_file_tree',
+        description: 'Get a clean, hierarchical file tree of the codebase or a specific directory. Useful for understanding project structure directly. Codebase name supports partial matching.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            codebase: { type: 'string', description: 'Codebase name (partial match supported)' },
+            path: { type: 'string', description: 'Optional subpath to get tree for a specific directory (default: root)' }
+          },
+          required: ['codebase']
+        }
+      },
+      {
         name: 'get_file_info',
         description: 'Get file structure (functions, classes, imports) without content. Codebase name supports partial matching.',
         inputSchema: {
@@ -1415,11 +1462,12 @@ export class CodebaseIndexingService {
       },
       {
         name: 'get_prioritized_files',
-        description: 'Get files ordered by importance (high/medium/low priority). Codebase name supports partial matching.',
+        description: 'Get files ordered by importance (high/medium/low priority) OR raw file tree. Useful for getting a holistic structural view of the project. Codebase name supports partial matching.',
         inputSchema: {
           type: 'object',
           properties: {
             name: { type: 'string', description: 'Codebase name (partial match supported)' },
+            asTree: { type: 'boolean', default: true, description: 'Return a visual directory tree string instead of a partitioned JSON list' },
             filter: {
               type: 'object',
               properties: {

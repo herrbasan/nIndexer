@@ -178,10 +178,24 @@ export class Indexer {
     console.log(`[Indexer:perf] Phase 1 - Parsing (${parsedFiles.length} files, ${parseBinarySkip} binary, ${parseFileReadCount} read): ${phase1Duration}ms`);
     console.log(`[Indexer:perf]   readFile: ${parseReadTime}ms, hash: ${parseHashTime}ms, regex: ${parseRegexTime}ms, embedPrep: ${parseEmbedPrepTime}ms`);
 
-    const embeddableFiles = parsedFiles.filter(p => p.content && p.content.trim().length >= 50);
-    const noiseFiles = parsedFiles.filter(p => !p.content || p.content.trim().length < 50);
+    const NOISE_FILENAMES = new Set([
+      '.gitignore', '.gitmodules', '.gitattributes', '.dockerignore', '.eslintignore', '.prettierignore',
+      '.npmrc', '.yarnrc', '.nvmrc',
+      'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'cargo.lock', 'gemfile.lock', 'poetry.lock'
+    ]);
+    
+    const isNoiseDesc = (p) => {
+      const name = p.relativePath.split('/').pop().toLowerCase();
+      // Purely declarative files
+      if (NOISE_FILENAMES.has(name)) return true;
+      // Too little content
+      return !p.content || p.content.trim().length < 50;
+    };
+
+    const embeddableFiles = parsedFiles.filter(p => !isNoiseDesc(p));
+    const noiseFiles = parsedFiles.filter(p => isNoiseDesc(p));
     if (noiseFiles.length > 0) {
-      console.log(`[Indexer:perf] Noise filter: ${noiseFiles.length} files skipped from embedding (binary/empty/small)`);
+      console.log(`[Indexer:perf] Noise filter: ${noiseFiles.length} files skipped from embedding (binary/empty/small/declarative)`);
     }
 
     // Phase 2: Batch generate embeddings (only for content-bearing files)

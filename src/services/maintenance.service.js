@@ -191,6 +191,14 @@ export class CodebaseMaintenance {
 
     this.stats.filesUpdated += totalChanges;
 
+    // Trigger LLM analysis if significant changes
+    if (totalChanges >= 5 || (toAdd.length > 0 && toAdd.some(p => /^package\.json$|^Cargo\.toml$|^pyproject\.toml$|^go\.mod$/.test(p)))) {
+      console.log(`[CodebaseMaintenance] ${codebaseName}: Significant changes detected. Triggering LLM analysis...`);
+      this.service.analyzeCodebase({ name: codebaseName }).catch(err => {
+        console.error(`[CodebaseMaintenance] Background analysis for ${codebaseName} failed:`, err);
+      });
+    }
+
     return {
       refreshed: true,
       filesUpdated: totalChanges,

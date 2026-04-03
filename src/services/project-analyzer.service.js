@@ -288,13 +288,23 @@ function generateDescription(files, packageData, codebaseName) {
 
   const dirs = [...new Set(files.map(f => f.split('/')[0]).filter(Boolean))];
   const langCounts = new Map();
+  const langWeights = {
+    js: 10, ts: 10, py: 10, go: 10, rs: 10, rb: 10, java: 10, cpp: 10, c: 10, cs: 10, php: 10,
+    jsx: 10, tsx: 10, vue: 10, svelte: 10,
+    json: 0.1, md: 0.1, txt: 0.1, yml: 0.1, yaml: 0.1, xml: 0.1,
+    png: 0.01, jpg: 0.01, jpeg: 0.01, gif: 0.01, svg: 0.01, webp: 0.01
+  };
+  
   for (const f of files) {
-    const ext = f.split('.').pop();
-    langCounts.set(ext, (langCounts.get(ext) || 0) + 1);
+    const ext = f.split('.').pop()?.toLowerCase();
+    if (ext) {
+      const weight = langWeights[ext] ?? 1;
+      langCounts.set(ext, (langCounts.get(ext) || 0) + weight);
+    }
   }
   const topLang = [...langCounts.entries()].sort((a, b) => b[1] - a[1])[0];
-  const langMap = { js: 'JavaScript', ts: 'TypeScript', py: 'Python', go: 'Go', rs: 'Rust', rb: 'Ruby', java: 'Java', cpp: 'C++', c: 'C', cs: 'C#' };
-  const lang = langMap[topLang?.[0]] || topLang?.[0] || 'unknown';
+  const langMap = { js: 'JavaScript', ts: 'TypeScript', py: 'Python', go: 'Go', rs: 'Rust', rb: 'Ruby', java: 'Java', cpp: 'C++', c: 'C', cs: 'C#', jsx: 'React', tsx: 'React TS', vue: 'Vue', svelte: 'Svelte' };
+  const lang = langMap[topLang?.[0]] || topLang?.[0] || 'mixed';
   const fileCount = files.length;
   const dirList = dirs.slice(0, 3).join(', ');
 
@@ -348,20 +358,50 @@ export async function analyzeProject(router, metadata, sourcePath, onProgress) {
   const keyConcepts = inferKeyConcepts(allFiles, packageData);
 
   const codebaseName = path.basename(sourcePath);
-  const description = generateDescription(allFiles, packageData, codebaseName);
-  const purpose = generatePurpose(allFiles, packageData, codebaseName);
-
+  
   const allKeyFiles = [
     ...fileTreeAnalysis.keyFiles.high,
     ...fileTreeAnalysis.keyFiles.medium
   ];
+  
+  let description = generateDescription(allFiles, packageData, codebaseName);
+  let purpose = generatePurpose(allFiles, packageData, codebaseName);
+  let modelUsed = 'heuristic';
+
+  if (router?.predict) {
+    try {
+      onProgress?.({ phase: 'analyzing', message: 'Generating LLM analysis...' });
+      const prompt = `Analyze this codebase named "${codebaseName}".
+Tech stack identified so far: ${techStackList.join(', ')}
+Key files: ${allKeyFiles.slice(0, 20).join(', ')}
+
+Please provide a short 1-2 sentence description of what this project likely does, and another single sentence explaining its main purpose.`;
+      
+      const llmResponse = await router.predict({
+        prompt,
+        systemPrompt: "You are a senior codebase analyst.",
+        taskType: "query",
+        temperature: 0.2,
+        maxTokens: 150
+      });
+
+      if (llmResponse && llmResponse.text) {
+        description = llmResponse.text.trim();
+        purpose = "AI-generated codebase analysis";
+        modelUsed = 'llm';
+      }
+    } catch (e) {
+      console.warn(`[ProjectAnalyzer] LLM analysis failed: ${e.message}. Falling back to heuristics.`);
+    }
+  }
+
   const sourceHashes = await generateSourceHashes(allKeyFiles, sourcePath);
 
   const duration = Date.now() - startTime;
 
   return {
     analyzedAt: new Date().toISOString(),
-    model: 'heuristic',
+    model: modelUsed,
     version: '2',
 
     keyFiles: fileTreeAnalysis.keyFiles,
