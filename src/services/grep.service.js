@@ -128,6 +128,11 @@ export class GrepSearcher {
       '--max-filesize', '1M',
       '--max-depth', '20',
       '--json',
+      // Exclude Windows reserved names that can appear on UNC shares
+      '--glob', '!nul',
+      '--glob', '!con',
+      '--glob', '!prn',
+      '--glob', '!aux',
       '--glob', '!node_modules/**',
       '--glob', '!.git/**',
       '--glob', '!dist/**',
@@ -168,7 +173,8 @@ export class GrepSearcher {
       const fileMatchCounts = new Map();
       const rg = spawn('rg', args, {
         cwd: sourceDir,
-        stdio: ['ignore', 'pipe', 'pipe']
+        stdio: [0, 'pipe', 'pipe'],  // Inherit stdin to avoid Windows creating 'nul' file on UNC paths
+        windowsHide: true
       });
 
       let stderr = '';

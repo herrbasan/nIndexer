@@ -12,6 +12,9 @@ import { createHash } from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 import { parseJavaScript, parseTypeScript, parsePython, parseRust } from './parser/index.js';
+import { getLogger } from '../utils/logger.js';
+
+const logger = getLogger();
 
 const PARSERS = {
   '.js': parseJavaScript,
@@ -61,14 +64,14 @@ export class Indexer {
     const existingFiles = incremental 
       ? new Map((await metadata.getAllFiles()).map(f => [f.path, f]))
       : new Map();
-    console.log(`[Indexer:perf] Phase 0 - Load existing files: ${Date.now() - t0}ms (${existingFiles.size} existing)`);
+    logger.info(`Phase 0 - Load existing files`, { durationMs: Date.now() - t0, count: existingFiles.size }, 'Indexer');
 
     // Walk directory
     const t1 = Date.now();
     onProgress?.({ phase: 'scanning', message: 'Scanning files...' });
     const filesToIndex = [];
     await this._walkDirectory(source, source, filesToIndex);
-    console.log(`[Indexer:perf] Phase 0 - Walk directory: ${Date.now() - t1}ms (${filesToIndex.length} files found)`);
+    logger.info(`Phase 0 - Walk directory`, { durationMs: Date.now() - t1, count: filesToIndex.length }, 'Indexer');
 
     // Determine what to index
     const t2 = Date.now();
@@ -93,7 +96,7 @@ export class Indexer {
     for (const [p] of existingFiles) {
       toDelete.push(p);
     }
-    console.log(`[Indexer:perf] Phase 0 - Diff calculation: ${Date.now() - t2}ms (toIndex=${toIndex.length}, toDelete=${toDelete.length})`);
+    logger.info(`Phase 0 - Diff calculation`, { durationMs: Date.now() - t2, toIndex: toIndex.length, toDelete: toDelete.length }, 'Indexer');
 
     const totalFiles = toIndex.length;
     onProgress?.({ 
@@ -115,12 +118,12 @@ export class Indexer {
         }
       }
       await metadata.commit();
-      console.log(`[Indexer:perf] Phase 0 - Delete ${toDelete.length} removed files: ${Date.now() - t3}ms`);
+      logger.info(`Phase 0 - Delete removed files`, { durationMs: Date.now() - t3, count: toDelete.length }, 'Indexer');
     }
 
-    if (totalFiles === 0) {
+    if (toIndex.length === 0) {
       const totalDuration = Date.now() - startTime;
-      console.log(`[Indexer:perf] Total: ${totalDuration}ms (nothing to index)`);
+      logger.info(`Indexing complete - nothing to index`, { durationMs: totalDuration }, 'Indexer');
       return { indexed: 0, errors: 0, duration: totalDuration, errorsDetail: [], timing: { totalMs: totalDuration } };
     }
 
@@ -175,8 +178,18 @@ export class Indexer {
       }
     }
     const phase1Duration = Date.now() - phase1Start;
-    console.log(`[Indexer:perf] Phase 1 - Parsing (${parsedFiles.length} files, ${parseBinarySkip} binary, ${parseFileReadCount} read): ${phase1Duration}ms`);
-    console.log(`[Indexer:perf]   readFile: ${parseReadTime}ms, hash: ${parseHashTime}ms, regex: ${parseRegexTime}ms, embedPrep: ${parseEmbedPrepTime}ms`);
+    logger.info(`Phase 1 - Parsing`, { 
+      count: parsedFiles.length, 
+      binarySkip: parseBinarySkip, 
+      filesRead: parseFileReadCount,
+      durationMs: phase1Duration 
+    }, 'Indexer');
+    logger.debug(`Phase 1 breakdown`, {
+      readFileMs: parseReadTime,
+      hashMs: parseHashTime,
+      regexMs: parseRegexTime,
+      embedPrepMs: parseEmbedPrepTime
+    }, 'Indexer');
 
     const NOISE_FILENAMES = new Set([
       '.gitignore', '.gitmodules', '.gitattributes', '.dockerignore', '.eslintignore', '.prettierignore',
@@ -195,7 +208,7 @@ export class Indexer {
     const embeddableFiles = parsedFiles.filter(p => !isNoiseDesc(p));
     const noiseFiles = parsedFiles.filter(p => isNoiseDesc(p));
     if (noiseFiles.length > 0) {
-      console.log(`[Indexer:perf] Noise filter: ${noiseFiles.length} files skipped from embedding (binary/empty/small/declarative)`);
+      logger.info(`Noise filter`, { count: noiseFiles.length, reason: 'binary/empty/small/declarative' }, 'Indexer');
     }
 
     // Phase 2: Batch generate embeddings (only for content-bearing files)
@@ -250,7 +263,12 @@ export class Indexer {
       }
     }
     const phase2Duration = Date.now() - phase2Start;
-    console.log(`[Indexer:perf] Phase 2 - Embedding (${embeddings.length} files, ${embedBatchCount} batches): ${phase2Duration}ms (server: ${embedTotalServerTime}ms)`);
+    logger.info(`Phase 2 - Embedding`, { 
+      count: embeddings.length, 
+      batches: embedBatchCount,
+      durationMs: phase2Duration,
+      serverTimeMs: embedTotalServerTime
+    }, 'Indexer');
 
     // Phase 3: Batch insert into nVDB and SQLite
     const phase3Start = Date.now();
@@ -309,8 +327,8 @@ export class Indexer {
     }
     
     const phase3Duration = Date.now() - phase3Start;
-    console.log(`[Indexer:perf] Phase 3 - Storage (${indexed} files): ${phase3Duration}ms`);
-    console.log(`[Indexer:perf]   nVDB insert: ${nvdbInsertTime}ms, metadata.saveFile: ${metaSaveTime}ms`);
+    logger.info(`Phase 3 - Storage`, { count: indexed, durationMs: phase3Duration }, 'Indexer');
+    logger.debug(`Storage breakdown`, { nvdbInsertMs: nvdbInsertTime, metadataMs: metaSaveTime }, 'Indexer');
     
     if (noiseFiles.length > 0) {
       const noiseStart = Date.now();
@@ -324,11 +342,10 @@ export class Indexer {
       }
       await metadata.commit();
       indexed += noiseFiles.length;
-      console.log(`[Indexer:perf] Noise files: stored ${noiseFiles.length} in metadata only (${Date.now() - noiseStart}ms)`);
+      logger.info(`Noise files stored in metadata only`, { count: noiseFiles.length, durationMs: Date.now() - noiseStart }, 'Indexer');
     }
-    
-    const totalDuration = Date.now() - startTime;
-    console.log(`[Indexer:perf] TOTAL: ${totalDuration}ms (rate: ${(indexed / (totalDuration / 1000)).toFixed(1)}/s)`);
+
+    logger.info(`Indexing complete`, { durationMs: totalDuration, rate: (indexed / (totalDuration / 1000)).toFixed(1) }, 'Indexer');
     
     return {
       indexed,

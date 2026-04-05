@@ -2,3 +2,6 @@
 	path = nVDB
 	url = https://github.com/herrbasan/nVDB.git
 	branch = master
+[submodule "nLogger"]
+	path = nLogger
+	url = https://github.com/herrbasan/nLogger.git

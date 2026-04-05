@@ -9,7 +9,9 @@
  */
 
 import { randomUUID } from 'crypto';
+import { getLogger } from '../utils/logger.js';
 
+const logger = getLogger();
 const JSONRPC_VERSION = '2.0';
 
 // Tool method name to service method mapping
@@ -265,14 +267,14 @@ export function createRouter(indexingService) {
         result
       });
     } catch (err) {
-      console.error(`[Router] Error invoking ${method}:`, err);
+      logger.error(`Error invoking ${method}`, err, { method, params }, 'Router');
       sendToClient(clientId, {
         jsonrpc: JSONRPC_VERSION,
         id,
         error: {
           code: -32000,
           message: err.message || 'Internal error',
-          data: err.stack?.split('\n')[1]?.trim() // First line of stack trace
+          data: err.stack?.split('\n')[1]?.trim()
         }
       });
     }

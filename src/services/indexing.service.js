@@ -17,8 +17,11 @@ import { SearchRouter } from './search-router.service.js';
 import { GrepSearcher } from './grep.service.js';
 import { CodebaseMaintenance } from './maintenance.service.js';
 import { analyzeProject, isAnalysisStale, getPrioritizedFiles } from './project-analyzer.service.js';
+import { getLogger } from '../utils/logger.js';
 import path from 'path';
 import fs from 'fs/promises';
+
+const logger = getLogger();
 
 const DEFAULT_CONFIG = {
   dataDir: 'data/codebases',
@@ -80,7 +83,7 @@ export class CodebaseIndexingService {
     
     const start = Date.now();
     const all = await this.listCodebases();
-    console.log(`[CodebaseIndexing] Preloading ${all.length} codebases into memory...`);
+    logger.info(`Preloading ${all.length} codebases into memory`, { count: all.length }, 'CodebaseIndexing');
     
     // Load in batches to avoid overwhelming the system
     const batchSize = 20;
@@ -92,7 +95,7 @@ export class CodebaseIndexingService {
     }
     
     this.preloaded = true;
-    console.log(`[CodebaseIndexing] Preloaded ${all.length} codebases in ${Date.now() - start}ms`);
+    logger.info(`Preloaded ${all.length} codebases`, { count: all.length, durationMs: Date.now() - start }, 'CodebaseIndexing');
   }
   
   /**
@@ -283,7 +286,7 @@ export class CodebaseIndexingService {
       const existingMetadata = await this._loadCodebaseMetadata(name);
       if (existingMetadata?.status === 'indexing' || existingMetadata?.status === 'partial') {
         // Partial index from interrupted run - delete and re-index
-        console.log(`[${name}] Detected partial index, rebuilding...`);
+        logger.warn(`Detected partial index, rebuilding`, { name }, 'Indexing');
         await this.removeCodebase({ name, permanent: true });
       } else {
         throw new Error(`Codebase '${name}' already indexed. Use refreshCodebase() to update.`);
@@ -334,7 +337,7 @@ export class CodebaseIndexingService {
     this.indexes.set(name, { db, collection, metadata, source });
 
     this.analyzeCodebase({ name }).catch(err => {
-      console.log(`[${name}] Auto-analysis skipped: ${err.message}`);
+      logger.warn(`Auto-analysis skipped`, { name, reason: err.message }, 'Indexing');
     });
 
     return {
@@ -501,7 +504,7 @@ export class CodebaseIndexingService {
    * Run the indexing process
    */
   async _runIndexing(name, source, collection, metadata, incremental = false, onProgress) {
-    console.log(`[Indexing:perf] _runIndexing(${name}): start (incremental=${incremental})`);
+    logger.info(`Starting indexing`, { name, incremental }, 'Indexing');
     const startTime = Date.now();
     
     const result = await this.indexer.indexDirectory({
@@ -510,7 +513,7 @@ export class CodebaseIndexingService {
       metadata,
       incremental,
       onProgress: (progress) => {
-        console.log(`[${name}] ${progress.message}`);
+        logger.info(progress.message, { name, progress: progress.progress, total: progress.total }, 'Indexing');
         onProgress?.(progress);
       }
     });
@@ -518,7 +521,7 @@ export class CodebaseIndexingService {
     const t0 = Date.now();
     collection.flush();
     const flushTime = Date.now() - t0;
-    console.log(`[Indexing:perf] _runIndexing(${name}): collection.flush()=${flushTime}ms, total=${Date.now() - startTime}ms`);
+    logger.info(`Indexing complete`, { name, flushTimeMs: flushTime, totalMs: Date.now() - startTime }, 'Indexing');
 
     return result;
   }
@@ -529,7 +532,10 @@ export class CodebaseIndexingService {
   async searchKeyword({ codebase, query, limit = 20, searchContent = true, filter }) {
     const { metadata, source } = await this._getCodebase(codebase);
     
+    logger.info(`Keyword search`, { codebase, query, limit, searchContent }, 'Search');
+    
     let pathResults = await metadata.searchKeyword(query, limit * 2);
+    logger.debug(`Path results`, { count: pathResults.length }, 'Search');
     
     let contentResults = [];
     if (searchContent) {
@@ -541,7 +547,12 @@ export class CodebaseIndexingService {
           caseSensitive: false,
           excludeExtensions: [...BINARY_EXTENSIONS]
         });
-      } catch {}
+        logger.debug(`Content results`, { count: contentResults.length }, 'Search');
+      } catch (err) {
+        logger.error(`Grep error for query "${query}"`, err, { query, sourcePath: source }, 'Search');
+        const sourceExists = await fs.access(source).then(() => true).catch(() => false);
+        logger.error(`Source path check`, { path: source, exists: sourceExists }, 'Search');
+      }
     }
     
     const seen = new Set();
@@ -570,7 +581,31 @@ export class CodebaseIndexingService {
     if (filter?.excludeExtensions || filter?.includeExtensions) {
       results = results.filter(r => _matchesExtension(r.path, filter));
     }
+    
+    if (results.length === 0 && searchContent && contentResults.length === 0) {
+      logger.debug(`No results, trying fallback grep with regex mode`, { query }, 'Search');
+      try {
+        const fallbackResults = await this.grepSearcher.grep(source, query, {
+          regex: true,
+          limit: limit * 2,
+          maxMatchesPerFile: 1,
+          caseSensitive: false,
+          excludeExtensions: [...BINARY_EXTENSIONS]
+        });
+        logger.debug(`Fallback results`, { count: fallbackResults.length }, 'Search');
+        for (const r of fallbackResults) {
+          if (!seen.has(r.path)) {
+            seen.add(r.path);
+            results.push({ path: r.path, rank: -0.3, contentMatches: { line: r.line, content: r.content } });
+          }
+        }
+      } catch (err) {
+        logger.error(`Fallback grep failed`, err, { query }, 'Search');
+      }
+    }
+    
     results = results.slice(0, limit);
+    logger.info(`Search complete`, { codebase, query, resultCount: results.length }, 'Search');
     
     return {
       results: results.map(r => ({
@@ -1552,7 +1587,9 @@ export async function init(context) {
         serviceInstance.progressCallback = cb ? (data) => context.progress(data.message, data.progress, data.total) : null;
     });
     // Try to preload but don't crash on failure
-    serviceInstance.preloadAll().catch(err => console.error('[CodebaseIndexing] Preload failed:', err.message));
+    serviceInstance.preloadAll().catch(err => {
+      logger.error('Preload failed', err, {}, 'CodebaseIndexing');
+    });
     // Start periodic maintenance cycle
     serviceInstance.startMaintenance();
     return serviceInstance;
@@ -1563,6 +1600,7 @@ export async function shutdown() {
         if (serviceInstance.stopMaintenance) serviceInstance.stopMaintenance();
         serviceInstance.maintenance.stop();
     }
+    logger.info('Indexing service shutdown', {}, 'CodebaseIndexing');
 }
 
 // Tool handlers

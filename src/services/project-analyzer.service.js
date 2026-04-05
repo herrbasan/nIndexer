@@ -11,6 +11,9 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { createHash } from 'crypto';
+import { getLogger } from '../utils/logger.js';
+
+const logger = getLogger();
 
 // Config files to check for tech stack (in priority order)
 const CONFIG_FILES = [
@@ -391,7 +394,7 @@ Please provide a short 1-2 sentence description of what this project likely does
         modelUsed = 'llm';
       }
     } catch (e) {
-      console.warn(`[ProjectAnalyzer] LLM analysis failed: ${e.message}. Falling back to heuristics.`);
+      logger.warn(`LLM analysis failed, falling back to heuristics`, { reason: e.message }, 'ProjectAnalyzer');
     }
   }
 

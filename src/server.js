@@ -11,9 +11,13 @@ import { config } from './config.js';
 import { LLMClient } from './llm-client.js';
 import { init as initIndexingService, shutdown as shutdownIndexingService } from './services/indexing.service.js';
 import { createRouter } from './api/router.js';
+import { getLogger } from './utils/logger.js';
 
 const HOST = config.service.host;
 const PORT = config.service.port;
+
+// Initialize logger
+const logger = getLogger();
 
 let server;
 let router;
@@ -232,7 +236,7 @@ async function main() {
     // Create WebSocket wrapper
     const ws = createWsSocket(socket, router);
     const clientId = router.addClient(ws);
-    console.log(`[Server] Client connected: ${clientId} from ${socket.remoteAddress}`);
+    logger.info(`Client connected: ${clientId} from ${socket.remoteAddress}`, { clientId, remoteAddress: socket.remoteAddress }, 'WebSocket');
 
     ws.on('message', (message) => {
       try {
@@ -247,19 +251,25 @@ async function main() {
 
     ws.on('close', () => {
       router.removeClient(clientId);
-      console.log(`[Server] Client disconnected: ${clientId}`);
+      logger.info(`Client disconnected: ${clientId}`, { clientId }, 'WebSocket');
     });
 
     ws.on('error', (err) => {
-      console.error(`[Server] WebSocket error for ${clientId}:`, err.message);
+      logger.error(`WebSocket error for ${clientId}`, err, { clientId }, 'WebSocket');
     });
   });
 
   // Start listening
   server.listen(PORT, HOST, () => {
-    console.log(`[Server] nIndexer service running at http://${HOST}:${PORT}`);
-    console.log(`[Server] WebSocket endpoint: ws://${HOST}:${PORT}`);
-    console.log(`[Server] Health check: http://${HOST}:${PORT}/health`);
+    const sessionInfo = logger.getSessionInfo();
+    logger.info(`nIndexer service starting`, {
+      host: HOST,
+      port: PORT,
+      sessionId: sessionInfo.sessionId,
+      logFile: sessionInfo.logFile
+    }, 'Server');
+    logger.info(`WebSocket endpoint: ws://${HOST}:${PORT}`, {}, 'Server');
+    logger.info(`Health check: http://${HOST}:${PORT}/health`, {}, 'Server');
   });
 
   // Graceful shutdown
@@ -268,7 +278,7 @@ async function main() {
 }
 
 async function shutdown() {
-  console.log('[Server] Shutting down...');
+  logger.warn('Server shutting down', {}, 'Server');
 
   // Close all client connections
   router?.closeAll();
@@ -279,10 +289,14 @@ async function shutdown() {
   // Close LLM client
   llmClient?.close();
 
+  // Close logger gracefully
+  logger.close('Server shutdown complete');
+  
   process.exit(0);
 }
 
 main().catch((err) => {
-  console.error('[Server] Fatal error:', err);
+  logger.error('Fatal server error', err, {}, 'Server');
+  logger.close('Fatal error during startup');
   process.exit(1);
 });

@@ -1,5 +1,8 @@
 import { randomUUID } from 'crypto';
 import { config } from './config.js';
+import { getLogger } from './utils/logger.js';
+
+const logger = getLogger();
 
 // Use Node.js built-in WebSocket (Node.js 21+)
 const WebSocket = globalThis.WebSocket || globalThis.ws;
@@ -28,7 +31,7 @@ export class LLMClient {
     this._ws = new WebSocket(this.wsUrl);
 
     this._ws.onopen = () => {
-      console.log('[LLMClient] Connected to gateway');
+      logger.info(`Connected to LLM Gateway`, { url: this.wsUrl }, 'LLMClient');
       this._reconnectAttempts = 0;
     };
 
@@ -57,7 +60,7 @@ export class LLMClient {
 
     this._ws.onclose = () => {
       if (this._isClosed) return;
-      console.warn('[LLMClient] WebSocket disconnected');
+      logger.warn(`WebSocket disconnected`, { url: this.wsUrl }, 'LLMClient');
       for (const req of this._pendingRequests.values()) {
         req.reject(new Error('WebSocket disconnected'));
       }
@@ -68,7 +71,7 @@ export class LLMClient {
     };
 
     this._ws.onerror = (err) => {
-      console.error('[LLMClient] WebSocket error:', err.message);
+      logger.error(`WebSocket error`, err, { url: this.wsUrl }, 'LLMClient');
     };
   }
 

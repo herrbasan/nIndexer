@@ -10,6 +10,9 @@
 
 import fs from 'fs/promises';
 import path from 'path';
+import { getLogger } from '../utils/logger.js';
+
+const logger = getLogger();
 
 export class SimpleMetadataStore {
   constructor(basePath) {
@@ -59,7 +62,7 @@ export class SimpleMetadataStore {
     await this.save();
     const total = Date.now() - t0;
     if (total > 10) {
-      console.log(`[Metadata:perf] commit(): ${total}ms (${Object.keys(this.cache.files).length} files)`);
+      logger.debug(`Metadata commit`, { durationMs: total, fileCount: Object.keys(this.cache.files).length }, 'Metadata');
     }
   }
 

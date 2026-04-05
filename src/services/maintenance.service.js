@@ -10,6 +10,9 @@
 
 import fs from 'fs/promises';
 import path from 'path';
+import { getLogger } from '../utils/logger.js';
+
+const logger = getLogger();
 
 export class CodebaseMaintenance {
   constructor(service, config = {}) {
@@ -42,7 +45,7 @@ export class CodebaseMaintenance {
       this.config.intervalMs
     );
     
-    console.log(`[CodebaseMaintenance] Started (interval: ${this.config.intervalMs / 60000}min)`);
+    logger.info(`Maintenance started`, { intervalMin: this.config.intervalMs / 60000 }, 'Maintenance');
   }
 
   /**
@@ -52,7 +55,7 @@ export class CodebaseMaintenance {
     if (this.intervalId) {
       clearInterval(this.intervalId);
       this.intervalId = null;
-      console.log('[CodebaseMaintenance] Stopped');
+      logger.info(`Maintenance stopped`, {}, 'Maintenance');
     }
   }
 
@@ -61,7 +64,7 @@ export class CodebaseMaintenance {
    */
   async runMaintenance() {
     if (this.isRunning) {
-      console.log('[CodebaseMaintenance] Skipping - previous run still active');
+      logger.warn(`Maintenance skipped - previous run still active`, {}, 'Maintenance');
       return;
     }
 
@@ -71,11 +74,11 @@ export class CodebaseMaintenance {
     try {
       const t0 = Date.now();
       const codebases = await this.service.listCodebases();
-      console.log(`[Maintenance:perf] listCodebases: ${Date.now() - t0}ms (${codebases.length} codebases)`);
+      logger.debug(`List codebases`, { durationMs: Date.now() - t0, count: codebases.length }, 'Maintenance');
 
       for (const cb of codebases) {
         if (cb.status === 'indexing') {
-          console.log(`[CodebaseMaintenance] Skipping ${cb.name} - currently indexing`);
+          logger.debug(`Skipping codebase`, { name: cb.name, reason: 'currently indexing' }, 'Maintenance');
           continue;
         }
 
@@ -84,12 +87,12 @@ export class CodebaseMaintenance {
           const result = await this.checkAndRefresh(cb.name);
           const cbDuration = Date.now() - cbStart;
           if (cbDuration > 1000) {
-            console.log(`[Maintenance:perf] ${cb.name}: ${cbDuration}ms (refreshed=${result.refreshed}, reason=${result.reason})`);
+            logger.debug(`Refresh performance`, { name: cb.name, durationMs: cbDuration, refreshed: result.refreshed, reason: result.reason }, 'Maintenance');
           } else if (result.refreshed) {
-            console.log(`[CodebaseMaintenance] Refreshed ${cb.name}: ${result.filesUpdated} files updated`);
+            logger.info(`Codebase refreshed`, { name: cb.name, filesUpdated: result.filesUpdated }, 'Maintenance');
           }
         } catch (err) {
-          console.error(`[CodebaseMaintenance] Failed to refresh ${cb.name}:`, err.message);
+          logger.error(`Failed to refresh`, err, { name: cb.name }, 'Maintenance');
           this.stats.errors++;
         }
       }
@@ -98,13 +101,11 @@ export class CodebaseMaintenance {
       this.lastRun = new Date().toISOString();
       
       const duration = Date.now() - startTime;
-      console.log(`[Maintenance:perf] Full cycle: ${duration}ms`);
-      
+      logger.info(`Maintenance cycle complete`, { durationMs: duration }, 'Maintenance');
+      this.stats.totalCycles++;
     } catch (err) {
-      console.error('[CodebaseMaintenance] Failed:', err.message);
+      logger.error(`Maintenance cycle failed`, err, {}, 'Maintenance');
       this.stats.errors++;
-    } finally {
-      this.isRunning = false;
     }
   }
 
@@ -161,7 +162,17 @@ export class CodebaseMaintenance {
     
     const totalTime = Date.now() - totalStart;
     if (totalTime > 500 || totalChanges > 0) {
-      console.log(`[Maintenance:perf] checkAndRefresh(${codebaseName}): ${totalTime}ms (load=${loadTime}ms, scan=${scanTime}ms, loadIndexed=${loadIndexedTime}ms, diff=${diffTime}ms) found: +${toAdd.length} ~${toUpdate.length} -${toDelete.length}`);
+      logger.debug(`checkAndRefresh performance`, { 
+        name: codebaseName, 
+        durationMs: totalTime,
+        loadMs: loadTime,
+        scanMs: scanTime,
+        loadIndexedMs: loadIndexedTime,
+        diffMs: diffTime,
+        added: toAdd.length,
+        updated: toUpdate.length,
+        deleted: toDelete.length
+      }, 'Maintenance');
     }
     
     if (totalChanges === 0) {
@@ -178,24 +189,29 @@ export class CodebaseMaintenance {
 
     // Run incremental refresh
     const refreshStart = Date.now();
-    console.log(`[CodebaseMaintenance] ${codebaseName}: ${toAdd.length} added, ${toUpdate.length} updated, ${toDelete.length} deleted`);
+    logger.info(`Codebase refresh`, { 
+      name: codebaseName,
+      added: toAdd.length,
+      updated: toUpdate.length,
+      deleted: toDelete.length
+    }, 'Maintenance');
     
     await this.service.refreshCodebase({ name: codebaseName }, (progress) => {
       if (progress.phase === 'error') {
-        console.error(`[CodebaseMaintenance] ${codebaseName}: ${progress.message}`);
+        logger.error(`Refresh progress error`, { name: codebaseName, message: progress.message }, 'Maintenance');
       }
     });
 
     const refreshTime = Date.now() - refreshStart;
-    console.log(`[Maintenance:perf] ${codebaseName} refresh: ${refreshTime}ms`);
+    logger.debug(`Refresh performance`, { name: codebaseName, durationMs: refreshTime }, 'Maintenance');
 
     this.stats.filesUpdated += totalChanges;
 
     // Trigger LLM analysis if significant changes
     if (totalChanges >= 5 || (toAdd.length > 0 && toAdd.some(p => /^package\.json$|^Cargo\.toml$|^pyproject\.toml$|^go\.mod$/.test(p)))) {
-      console.log(`[CodebaseMaintenance] ${codebaseName}: Significant changes detected. Triggering LLM analysis...`);
+      logger.info(`Significant changes detected`, { name: codebaseName, changes: totalChanges }, 'Maintenance');
       this.service.analyzeCodebase({ name: codebaseName }).catch(err => {
-        console.error(`[CodebaseMaintenance] Background analysis for ${codebaseName} failed:`, err);
+        logger.error(`Background analysis failed`, err, { name: codebaseName }, 'Maintenance');
       });
     }
 
