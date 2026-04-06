@@ -345,6 +345,7 @@ export class Indexer {
       logger.info(`Noise files stored in metadata only`, { count: noiseFiles.length, durationMs: Date.now() - noiseStart }, 'Indexer');
     }
 
+    const totalDuration = Date.now() - startTime;
     logger.info(`Indexing complete`, { durationMs: totalDuration, rate: (indexed / (totalDuration / 1000)).toFixed(1) }, 'Indexer');
     
     return {
@@ -549,18 +550,220 @@ export class Indexer {
   }
 
   _prepareEmbeddingText(filePath, content, symbols) {
-    // Prioritize symbols - they define what the file IS
+    const ext = path.extname(filePath).toLowerCase();
+    const fileName = path.basename(filePath);
+    const dirName = path.dirname(filePath);
+
     const symbolNames = [
-      ...symbols.functions.map(f => f.name),
-      ...symbols.classes.map(c => c.name)
+      ...symbols.functions.map(f => `${f.name}${f.signature || ''}`),
+      ...symbols.classes.map(c => {
+        const methods = c.methods ? c.methods.map(m => m.name).join(' ') : '';
+        return `${c.name} ${methods}`;
+      })
     ].join(' ');
-    
-    // Repeat symbols for weight + smaller content sample
-    const contentSample = content.slice(0, 1000);
-    
-    // Format: path + repeated symbols + content
-    // Repeating symbols gives them more weight in the embedding
-    return `${filePath} ${symbolNames} ${symbolNames} ${contentSample}`;
+
+    const symbolBlock = symbolNames
+      ? `[symbols: ${symbolNames}] [exports: ${symbolNames}]`
+      : '';
+
+    let contentBlock = '';
+
+    if (this._isHtmlLike(ext)) {
+      contentBlock = this._extractHtmlSemanticText(content);
+    } else if (this._isConfigLike(ext, fileName)) {
+      contentBlock = this._extractConfigSemanticText(filePath, content);
+    } else if (this._isDocLike(ext)) {
+      contentBlock = this._extractDocSemanticText(content);
+    } else if (this._isStyleLike(ext)) {
+      contentBlock = this._extractStyleSemanticText(content);
+    } else {
+      contentBlock = this._extractCodeSemanticText(content, symbols);
+    }
+
+    return `${fileName} ${dirName} ${symbolBlock} ${contentBlock}`;
+  }
+
+  _isHtmlLike(ext) {
+    return ['.html', '.htm', '.xml', '.svg', '.vue', '.svelte', '.astro'].includes(ext);
+  }
+
+  _isConfigLike(ext, fileName) {
+    return ['.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.env'].includes(ext) ||
+      fileName === '.env' || fileName === '.env.example' || fileName === '.gitignore';
+  }
+
+  _isDocLike(ext) {
+    return ['.md', '.mdx', '.txt', '.rst', '.adoc'].includes(ext);
+  }
+
+  _isStyleLike(ext) {
+    return ['.css', '.scss', '.sass', '.less'].includes(ext);
+  }
+
+  _extractHtmlSemanticText(content) {
+    const parts = [];
+
+    const titleMatch = content.match(/<title[^>]*>([^<]+)<\/title>/i);
+    if (titleMatch) parts.push(titleMatch[1].trim());
+
+    const metaDesc = content.match(/<meta\s+[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i);
+    if (metaDesc) parts.push(metaDesc[1].trim());
+
+    const headings = content.match(/<h[1-6][^>]*>([^<]+)<\/h[1-6]>/gi) || [];
+    for (const h of headings.slice(0, 10)) {
+      parts.push(h.replace(/<[^>]+>/g, '').trim());
+    }
+
+    const comments = content.match(/<!--\s*([\s\S]*?)\s*-->/g) || [];
+    for (const c of comments.slice(0, 5)) {
+      const text = c.replace(/<!--\s*/, '').replace(/\s*-->/, '').trim();
+      if (text.length > 5 && text.length < 500) parts.push(text);
+    }
+
+    const attrs = content.match(/(?:class|id|data-[\w-]+)=["']([^"']+)["']/gi) || [];
+    const semanticTokens = new Set();
+    for (const a of attrs.slice(0, 30)) {
+      const val = a.replace(/^[^=]+=/, '').replace(/["']/g, '');
+      val.split(/[\s-_]+/).forEach(t => {
+        if (t.length > 2) semanticTokens.add(t.toLowerCase());
+      });
+    }
+    if (semanticTokens.size > 0) parts.push([...semanticTokens].join(' '));
+
+    return parts.join(' ').slice(0, 800);
+  }
+
+  _extractConfigSemanticText(filePath, content) {
+    const parts = [filePath];
+
+    try {
+      if (content.trim().startsWith('{') || content.trim().startsWith('[')) {
+        const obj = JSON.parse(content);
+        const keys = this._extractJsonKeys(obj, 3);
+        if (keys.length > 0) parts.push(`keys: ${keys.join(' ')}`);
+
+        if (obj.name) parts.push(`name: ${obj.name}`);
+        if (obj.description) parts.push(`description: ${obj.description}`);
+        if (obj.version) parts.push(`version: ${obj.version}`);
+        if (obj.main) parts.push(`main: ${obj.main}`);
+        if (obj.type) parts.push(`type: ${obj.type}`);
+        if (obj.scripts && typeof obj.scripts === 'object') {
+          parts.push(`scripts: ${Object.keys(obj.scripts).join(' ')}`);
+        }
+        if (obj.dependencies && typeof obj.dependencies === 'object') {
+          parts.push(`dependencies: ${Object.keys(obj.dependencies).join(' ')}`);
+        }
+        if (obj.devDependencies && typeof obj.devDependencies === 'object') {
+          parts.push(`devDependencies: ${Object.keys(obj.devDependencies).join(' ')}`);
+        }
+        if (Array.isArray(obj)) {
+          const items = obj.slice(0, 20).map(i => typeof i === 'string' ? i : JSON.stringify(i).slice(0, 50));
+          parts.push(`items: ${items.join(' ')}`);
+        }
+      } else {
+        const lines = content.split('\n')
+          .filter(l => l.trim() && !l.trim().startsWith('#'))
+          .map(l => l.split('=')[0]?.trim() || l.split(':')[0]?.trim() || l.trim())
+          .filter(Boolean);
+        parts.push(lines.slice(0, 30).join(' '));
+      }
+    } catch {
+      parts.push(content.split('\n').filter(l => l.trim()).slice(0, 20).join(' '));
+    }
+
+    return parts.join(' ').slice(0, 800);
+  }
+
+  _extractJsonKeys(obj, maxDepth, depth = 0) {
+    if (depth >= maxDepth || !obj || typeof obj !== 'object') return [];
+    const keys = [];
+    for (const [k, v] of Object.entries(obj)) {
+      keys.push(k);
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        keys.push(...this._extractJsonKeys(v, maxDepth, depth + 1));
+      }
+      if (keys.length > 50) break;
+    }
+    return keys;
+  }
+
+  _extractDocSemanticText(content) {
+    const lines = content.split('\n');
+    const parts = [];
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('#') || trimmed.startsWith('##') || trimmed.startsWith('###')) {
+        parts.push(trimmed.replace(/^#+\s*/, ''));
+      } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ') || trimmed.startsWith('> ')) {
+        parts.push(trimmed.replace(/^[-*>]\s*/, '').split('|')[0]);
+      } else if (trimmed.startsWith('```')) {
+        parts.push(trimmed.replace(/^```\w*/, 'code block'));
+      }
+      if (parts.join(' ').length > 800) break;
+    }
+
+    if (parts.join(' ').length < 100) {
+      parts.push(content.replace(/[#*`>\-|]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 600));
+    }
+
+    return parts.join(' ').slice(0, 800);
+  }
+
+  _extractStyleSemanticText(content) {
+    const selectors = content.match(/[\w.#\-\[\]=~^$*:"']+\s*\{/g) || [];
+    const vars = content.match(/--[\w-]+/g) || [];
+    const atRules = content.match(/@[\w-]+/g) || [];
+
+    const parts = [
+      ...selectors.slice(0, 30).map(s => s.replace(/\s*\{$/, '')),
+      ...new Set(vars).slice(0, 20),
+      ...new Set(atRules).slice(0, 10)
+    ];
+
+    return parts.join(' ').slice(0, 800);
+  }
+
+  _extractCodeSemanticText(content, symbols) {
+    const parts = [];
+
+    const blockComments = content.match(/\/\*\*[\s\S]*?\*\//g) || [];
+    for (const c of blockComments.slice(0, 3)) {
+      const text = c
+        .replace(/\/\*\*?/g, '').replace(/\*\//g, '')
+        .replace(/\*\s*/g, '').replace(/\s+/g, ' ').trim();
+      if (text.length > 10 && text.length < 500) parts.push(text);
+    }
+
+    const lineComments = content.match(/\/\/\s*(.+)/g) || [];
+    for (const c of lineComments.slice(0, 10)) {
+      const text = c.replace(/\/\/\s*/, '').trim();
+      if (text.length > 5 && text.length < 200) parts.push(text);
+    }
+
+    const strings = content.match(/['"`]([^'"`\n]{10,100})['"`]/g) || [];
+    for (const s of strings.slice(0, 10)) {
+      const text = s.replace(/^['"`]/, '').replace(/['"`]$/, '');
+      if (/^[A-Z]/.test(text) || text.includes(' ') || text.includes('.')) {
+        parts.push(text);
+      }
+    }
+
+    const importLines = content.match(/(?:import|require|from|use)\s+[^;\n]+/g) || [];
+    for (const imp of importLines.slice(0, 10)) {
+      parts.push(imp.trim());
+    }
+
+    const codeBody = content
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/.*/g, '')
+      .replace(/['"`][^'"`\n]*['"`]/g, '')
+      .replace(/\b(const|let|var|function|async|await|return|if|else|for|while|switch|case|break|continue|try|catch|finally|throw|new|this|class|extends|import|export|from|default|static|get|set|typeof|instanceof|in|of|null|undefined|true|false)\b/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    parts.push(codeBody.slice(0, 500));
+
+    return parts.join(' ').slice(0, 800);
   }
 
   _getLanguage(ext) {

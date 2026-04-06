@@ -5,10 +5,22 @@
  * Features: Caching, parallel threads, file size limits, early termination
  */
 
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import { createHash } from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
+
+let _rgPath = null;
+function getRgPath() {
+  if (_rgPath !== null) return _rgPath;
+  try {
+    const whichCmd = process.platform === 'win32' ? 'where rg' : 'which rg';
+    _rgPath = execSync(whichCmd, { encoding: 'utf-8' }).split('\n')[0].trim();
+  } catch {
+    _rgPath = 'rg';
+  }
+  return _rgPath;
+}
 
 class GrepCache {
   constructor(maxSize = 100, ttlMs = 60000) {
@@ -171,9 +183,9 @@ export class GrepSearcher {
       const results = [];
       let matchCount = 0;
       const fileMatchCounts = new Map();
-      const rg = spawn('rg', args, {
-        cwd: sourceDir,
-        stdio: [0, 'pipe', 'pipe'],  // Inherit stdin to avoid Windows creating 'nul' file on UNC paths
+      const rgPath = getRgPath();
+      const rg = spawn(rgPath, [...args, sourceDir], {
+        stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true
       });
 
@@ -198,7 +210,7 @@ export class GrepSearcher {
             const parsed = JSON.parse(line);
             if (parsed.type === 'match') {
               const match = parsed.data;
-              const filePath = match.path.text;
+              const filePath = path.relative(sourceDir, match.path.text).replace(/\\/g, '/');
 
               const currentFileMatches = fileMatchCounts.get(filePath) || 0;
               if (maxMatchesPerFile > 0 && currentFileMatches >= maxMatchesPerFile) {

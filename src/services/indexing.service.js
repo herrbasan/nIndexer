@@ -689,18 +689,24 @@ export class CodebaseIndexingService {
     }
     
     if (strategy === 'hybrid' || strategy === 'keyword') {
-      const rawKeyword = await metadata.searchKeyword(query, limit * 2);
-      keywordResults.push(...rawKeyword.map(r => ({ path: r.path, rank: r.rank })));
-    }
-    
-    if (strategy === 'hybrid' && query.length < 50 && !query.includes(' ')) {
+      const pathResults = await metadata.searchKeyword(query, limit * 2);
+      keywordResults.push(...pathResults.map(r => ({ path: r.path, rank: r.rank, source: 'path' })));
+
       try {
-        grepResults = await this.grepSearcher.grep(source, query, { regex: false, limit: 20 });
-        const existingKeywordPaths = new Set(keywordResults.map(r => r.path));
-        for (const g of grepResults) {
-          if (!existingKeywordPaths.has(g.path)) {
-            keywordResults.push({ path: g.path, rank: -0.5 });
-            existingKeywordPaths.add(g.path);
+        const tokens = query.split(/[\s._-]+/).filter(t => t.length >= 2);
+        const searchTerms = tokens.length > 0 ? tokens : [query];
+        const contentResults = await this.grepSearcher.grep(source, searchTerms.join('|'), {
+          regex: true,
+          limit: limit * 3,
+          maxMatchesPerFile: 1,
+          caseSensitive: false,
+          excludeExtensions: [...BINARY_EXTENSIONS]
+        });
+        const existingPaths = new Set(keywordResults.map(r => r.path));
+        for (const g of contentResults) {
+          if (!existingPaths.has(g.path)) {
+            keywordResults.push({ path: g.path, rank: -0.3, source: 'content', match: g.content?.slice(0, 200) });
+            existingPaths.add(g.path);
           }
         }
       } catch {}
