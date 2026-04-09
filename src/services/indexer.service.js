@@ -717,8 +717,8 @@ export class Indexer {
 
     const parts = [
       ...selectors.slice(0, 30).map(s => s.replace(/\s*\{$/, '')),
-      ...new Set(vars).slice(0, 20),
-      ...new Set(atRules).slice(0, 10)
+      ...[...new Set(vars)].slice(0, 20),
+      ...[...new Set(atRules)].slice(0, 10)
     ];
 
     return parts.join(' ').slice(0, 800);
