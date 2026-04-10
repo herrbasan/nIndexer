@@ -89,6 +89,13 @@ export class Indexer {
         toIndex.push(file);
         existingFiles.delete(file.relativePath);
       } else {
+        // File unchanged - but check if it has a vector (embedding might have failed before)
+        const doc = collection.get(file.relativePath);
+        const hasVector = doc?.vector && doc.vector.length > 0;
+        if (!hasVector) {
+          logger.info(`Retrying file without embedding`, { path: file.relativePath }, 'Indexer');
+          toIndex.push(file);
+        }
         existingFiles.delete(file.relativePath);
       }
     }
@@ -133,6 +140,7 @@ export class Indexer {
     
     let indexed = 0;
     const errors = [];
+    const embedFailedFiles = [];
     let processedCount = 0;
     let lastProgressTime = Date.now();
 
@@ -245,6 +253,10 @@ export class Indexer {
             embeddings.push({ ...item, vector });
           } catch (e) {
             errors.push({ file: item.relativePath, error: e.message });
+            embedFailedFiles.push(item.relativePath);
+            // DON'T update metadata - leave existing vector/state intact
+            // This preserves embeddings from previous successful indexing
+            logger.debug(`Skipping file due to embedding error`, { path: item.relativePath, error: e.message }, 'Indexer');
           }
         }
       }
@@ -263,12 +275,22 @@ export class Indexer {
       }
     }
     const phase2Duration = Date.now() - phase2Start;
+    const embedFailures = embeddableFiles.length - embeddings.length;
     logger.info(`Phase 2 - Embedding`, { 
       count: embeddings.length, 
+      failed: embedFailures,
       batches: embedBatchCount,
       durationMs: phase2Duration,
       serverTimeMs: embedTotalServerTime
     }, 'Indexer');
+    
+    if (embedFailures > 0) {
+      logger.warn(`Embedding failures detected`, { 
+        failed: embedFailures, 
+        total: embeddableFiles.length,
+        note: 'Existing vectors preserved, files skipped'
+      }, 'Indexer');
+    }
 
     // Phase 3: Batch insert into nVDB and SQLite
     const phase3Start = Date.now();
@@ -348,9 +370,17 @@ export class Indexer {
     const totalDuration = Date.now() - startTime;
     logger.info(`Indexing complete`, { durationMs: totalDuration, rate: (indexed / (totalDuration / 1000)).toFixed(1) }, 'Indexer');
     
+    if (embedFailedFiles.length > 0) {
+      logger.warn(`Indexing completed with embedding failures`, { 
+        embedFailedCount: embedFailedFiles.length,
+        note: 'Files without embeddings preserved previous state (if any)'
+      }, 'Indexer');
+    }
+    
     return {
       indexed,
       errors: errors.length,
+      embedFailures: embedFailedFiles.length,
       duration: totalDuration,
       errorsDetail: errors.slice(0, 10),
       rate: indexed / (totalDuration / 1000),
@@ -448,13 +478,22 @@ export class Indexer {
    */
   async _walkDirectory(basePath, currentPath, files) {
     const entries = await fs.readdir(currentPath, { withFileTypes: true });
+    const relativeCurrent = path.relative(basePath, currentPath).replace(/\\/g, '/') || '.';
+    
+    // Debug: Log when entering top-level directories
+    if (relativeCurrent === '.' || !relativeCurrent.includes('/')) {
+      logger.info(`Walking directory`, { path: relativeCurrent, entries: entries.length }, 'Walker');
+    }
 
     for (const entry of entries) {
       const fullPath = path.join(currentPath, entry.name);
       const relativePath = path.relative(basePath, fullPath).replace(/\\/g, '/');
 
       if (entry.isDirectory()) {
-        if (this._shouldIgnore(relativePath, true)) continue;
+        if (this._shouldIgnore(relativePath, true)) {
+          logger.info(`Ignoring directory`, { path: relativePath }, 'Walker');
+          continue;
+        }
         await this._walkDirectory(basePath, fullPath, files);
       } else if (entry.isFile()) {
         if (this._shouldIgnore(relativePath, false)) continue;
@@ -506,8 +545,15 @@ export class Indexer {
   }
 
   _shouldIgnore(relativePath, isDirectory) {
+    // Debug: Log ignore check for top-level directories
+    if (!relativePath.includes('/')) {
+      logger.info(`Checking ignore`, { path: relativePath, patterns: this.config.ignorePatterns.length }, 'Walker');
+    }
     for (const pattern of this.config.ignorePatterns) {
-      if (this._matchGlob(relativePath, pattern)) return true;
+      if (this._matchGlob(relativePath, pattern)) {
+        logger.info(`Matched ignore pattern`, { path: relativePath, pattern }, 'Walker');
+        return true;
+      }
     }
     return false;
   }

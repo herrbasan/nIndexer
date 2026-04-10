@@ -663,28 +663,40 @@ export class CodebaseIndexingService {
     const semanticResults = [];
     const keywordResults = [];
     let grepResults = [];
+    let embeddingFailed = false;
     
     // Always do semantic for 'hybrid' and 'semantic' strategies
     if (strategy === 'hybrid' || strategy === 'semantic') {
-      const queryEmbedding = await this.router.embedText(query);
-      const rawResults = collection.search({
-        vector: queryEmbedding,
-        top_k: limit * 3,
-        approximate: true,
-        ef: 64
-      });
-      
-      for (const match of rawResults) {
-        const fileInfo = await metadata.getFile(match.id);
-        if (fileInfo) {
-          semanticResults.push({
-            path: match.id,
-            score: match.score,
-            language: fileInfo.language,
-            functions: fileInfo.functions || [],
-            classes: fileInfo.classes || []
-          });
+      try {
+        const queryEmbedding = await this.router.embedText(query);
+        const rawResults = collection.search({
+          vector: queryEmbedding,
+          top_k: limit * 3,
+          approximate: true,
+          ef: 64
+        });
+        
+        for (const match of rawResults) {
+          const fileInfo = await metadata.getFile(match.id);
+          if (fileInfo) {
+            semanticResults.push({
+              path: match.id,
+              score: match.score,
+              language: fileInfo.language,
+              functions: fileInfo.functions || [],
+              classes: fileInfo.classes || []
+            });
+          }
         }
+      } catch (err) {
+        embeddingFailed = true;
+        logger.warn(`Embedding unavailable for search, falling back to keyword-only`, { 
+          codebase, 
+          query, 
+          error: err.message 
+        }, 'Search');
+        // For hybrid: continue with empty semantic results (keyword will still work)
+        // For semantic: will return empty results (handled below)
       }
     }
     
@@ -757,11 +769,17 @@ export class CodebaseIndexingService {
       }
     }
     
-    return {
+    const result = {
       results: enriched,
       count: enriched.length,
       strategy
     };
+    
+    if (embeddingFailed) {
+      result.warning = 'Embedding service unavailable. Results are keyword-only.';
+    }
+    
+    return result;
   }
 
   /**
@@ -771,7 +789,21 @@ export class CodebaseIndexingService {
     const { collection, metadata } = await this._getCodebase(codebase);
 
     // Generate query embedding
-    const queryEmbedding = await this.router.embedText(query);
+    let queryEmbedding;
+    try {
+      queryEmbedding = await this.router.embedText(query);
+    } catch (err) {
+      logger.warn(`Embedding unavailable for semantic search`, { 
+        codebase, 
+        query, 
+        error: err.message 
+      }, 'Search');
+      return { 
+        results: [], 
+        count: 0, 
+        warning: 'Embedding service unavailable. Try keyword search instead.' 
+      };
+    }
 
     // Search nVDB
     const results = collection.search({
@@ -780,6 +812,13 @@ export class CodebaseIndexingService {
       approximate: true,
       ef: 64
     });
+    
+    logger.info(`Semantic search raw results`, { 
+      codebase, 
+      query, 
+      rawCount: results.length,
+      topScore: results[0]?.score 
+    }, 'Search');
 
     // Apply post-filtering and enrich results
     const enriched = [];
@@ -787,7 +826,10 @@ export class CodebaseIndexingService {
       if (enriched.length >= limit) break;
 
       const fileInfo = await metadata.getFile(match.id);
-      if (!fileInfo) continue;
+      if (!fileInfo) {
+        logger.debug(`No metadata for match`, { path: match.id }, 'Search');
+        continue;
+      }
 
       // Apply filters
       if (filter?.language && fileInfo.language?.toLowerCase() !== filter.language.toLowerCase()) continue;
