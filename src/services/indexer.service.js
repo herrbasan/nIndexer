@@ -44,6 +44,13 @@ const BINARY_EXTENSIONS = new Set([
   '.ndb', '.reg', '.wal', '.idx'
 ]);
 
+// Windows reserved filenames that can appear on UNC shares when scripts redirect to them
+const WINDOWS_RESERVED_NAMES = new Set([
+  'nul', 'con', 'prn', 'aux',
+  'com1', 'com2', 'com3', 'com4', 'com5', 'com6', 'com7', 'com8', 'com9',
+  'lpt1', 'lpt2', 'lpt3', 'lpt4', 'lpt5', 'lpt6', 'lpt7', 'lpt8', 'lpt9'
+]);
+
 export class Indexer {
   constructor(config, llmRouter) {
     this.config = config;
@@ -496,6 +503,13 @@ export class Indexer {
         }
         await this._walkDirectory(basePath, fullPath, files);
       } else if (entry.isFile()) {
+        // Skip Windows reserved filenames (nul, con, prn, etc.) that can appear on UNC shares
+        const nameWithoutExt = path.basename(entry.name, path.extname(entry.name)).toLowerCase();
+        if (WINDOWS_RESERVED_NAMES.has(nameWithoutExt)) {
+          logger.info(`Skipping Windows reserved filename`, { path: relativePath }, 'Walker');
+          continue;
+        }
+        
         if (this._shouldIgnore(relativePath, false)) continue;
 
         const stats = await fs.stat(fullPath);

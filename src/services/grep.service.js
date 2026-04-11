@@ -145,6 +145,8 @@ export class GrepSearcher {
       '--glob', '!con',
       '--glob', '!prn',
       '--glob', '!aux',
+      '--glob', '!com[0-9]*',
+      '--glob', '!lpt[0-9]*',
       '--glob', '!node_modules/**',
       '--glob', '!.git/**',
       '--glob', '!dist/**',
