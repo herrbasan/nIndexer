@@ -573,12 +573,7 @@ Service configuration.
   },
   "llm": {
     "gatewayWsUrl": "ws://localhost:3400/v1/realtime",
-    "gatewayHttpUrl": "http://localhost:3400",
-    "embedModel": "lmstudio-embed",
-    "models": {
-      "query": "glm5-chat",
-      "analysis": "glm5-chat"
-    }
+    "gatewayHttpUrl": "http://localhost:3400"
   }
 }
 ```

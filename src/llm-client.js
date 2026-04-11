@@ -11,8 +11,6 @@ export class LLMClient {
   constructor() {
     this.wsUrl = config.llm.gatewayWsUrl;
     this.httpUrl = config.llm.gatewayHttpUrl;
-    this.embedModel = config.llm.embedModel;
-    this.models = config.llm.models || {};
 
     this._ws = null;
     this._pendingRequests = new Map();
@@ -86,7 +84,7 @@ export class LLMClient {
     const res = await fetch(`${this.httpUrl}/v1/embeddings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ input: text, model: this.embedModel })
+      body: JSON.stringify({ input: text, task: 'embed' })
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
     const data = await res.json();
@@ -97,7 +95,7 @@ export class LLMClient {
     const res = await fetch(`${this.httpUrl}/v1/embeddings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ input: texts, model: this.embedModel })
+      body: JSON.stringify({ input: texts, task: 'embed' })
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
     const data = await res.json();
@@ -105,9 +103,9 @@ export class LLMClient {
   }
 
   async predict({ prompt, systemPrompt, taskType, temperature, maxTokens, responseFormat }) {
-    const model = this.models[taskType] || this.models.query || 'default';
+    const task = taskType || 'query';
     const response = await this.chat({
-      model,
+      task,
       messages: [{ role: 'user', content: prompt }],
       systemPrompt,
       maxTokens,
@@ -117,7 +115,7 @@ export class LLMClient {
     return response.content;
   }
 
-  async chat({ model, messages, systemPrompt, maxTokens, temperature, responseFormat }) {
+  async chat({ task, messages, systemPrompt, maxTokens, temperature, responseFormat }) {
     const id = randomUUID();
     const fullMessages = systemPrompt
       ? [{ role: 'system', content: systemPrompt }, ...messages]
@@ -131,7 +129,7 @@ export class LLMClient {
         id,
         method: 'chat.create',
         params: {
-          model,
+          task,
           messages: fullMessages,
           max_tokens: maxTokens,
           temperature,

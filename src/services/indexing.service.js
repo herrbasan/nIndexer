@@ -26,7 +26,7 @@ const logger = getLogger();
 const DEFAULT_CONFIG = {
   dataDir: 'data/codebases',
   trashDir: 'data/trash',
-  embeddingDimension: 768,
+  embeddingDimension: 3072, // Gemini embeddings dimension
   // embeddingModel is read from environment or config - no hardcoded default
   // This ensures it matches the router's configured embedding provider
   maxFileSize: 1024 * 1024, // 1MB

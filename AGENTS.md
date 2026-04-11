@@ -254,12 +254,7 @@ The logger automatically sanitizes metadata to prevent log bloat:
   },
   "llm": {
     "gatewayWsUrl": "ws://localhost:3400/v1/realtime",
-    "gatewayHttpUrl": "http://localhost:3400",
-    "embedModel": "badkid-embed",
-    "models": {
-      "query": "glm5-turbo-chat",
-      "analysis": "glm5-turbo-chat"
-    }
+    "gatewayHttpUrl": "http://localhost:3400"
   }
 }
 ```
