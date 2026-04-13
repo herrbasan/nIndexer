@@ -60,7 +60,7 @@ export class CodebaseMaintenance {
   }
 
   /**
-   * Run maintenance cycle - refresh all codebases
+   * Run maintenance cycle - refresh all codebases and index new ones
    */
   async runMaintenance() {
     if (this.isRunning) {
@@ -76,6 +76,35 @@ export class CodebaseMaintenance {
       const codebases = await this.service.listCodebases();
       logger.debug(`List codebases`, { durationMs: Date.now() - t0, count: codebases.length }, 'Maintenance');
 
+      // Index any configured but not-yet-indexed codebases
+      const indexedNames = new Set(codebases.map(cb => cb.name));
+      const configuredNames = await this.service._getAllConfiguredCodebases();
+      
+      for (const name of configuredNames) {
+        if (!indexedNames.has(name)) {
+          try {
+            const cbStart = Date.now();
+            logger.info(`Auto-indexing new codebase`, { name }, 'Maintenance');
+            const source = await this.service._getCodebaseSourcePath(name);
+            if (source) {
+              await this.service.indexCodebase({ name, source }, (progress) => {
+                if (progress.phase === 'error') {
+                  logger.error(`Auto-index progress error`, { name, message: progress.message }, 'Maintenance');
+                }
+              });
+              const cbDuration = Date.now() - cbStart;
+              logger.info(`Auto-index complete`, { name, durationMs: cbDuration }, 'Maintenance');
+            } else {
+              logger.warn(`Auto-index skipped - no source path`, { name }, 'Maintenance');
+            }
+          } catch (err) {
+            logger.error(`Auto-index failed`, err, { name }, 'Maintenance');
+            this.stats.errors++;
+          }
+        }
+      }
+
+      // Refresh already-indexed codebases
       for (const cb of codebases) {
         if (cb.status === 'indexing') {
           logger.debug(`Skipping codebase`, { name: cb.name, reason: 'currently indexing' }, 'Maintenance');
@@ -106,6 +135,8 @@ export class CodebaseMaintenance {
     } catch (err) {
       logger.error(`Maintenance cycle failed`, err, {}, 'Maintenance');
       this.stats.errors++;
+    } finally {
+      this.isRunning = false;
     }
   }
 

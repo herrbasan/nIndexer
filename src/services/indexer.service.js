@@ -66,6 +66,18 @@ export class Indexer {
     const startTime = Date.now();
     this.cancelled = false;
     
+    // Parse .gitmodules and add submodule paths to ignore patterns
+    const submodulePaths = await this._parseGitmodules(source);
+    if (submodulePaths.length > 0) {
+      logger.info(`Excluding submodules`, { count: submodulePaths.length, paths: submodulePaths }, 'Indexer');
+      for (const subPath of submodulePaths) {
+        const pattern = `**/${subPath}/**`;
+        if (!this.config.ignorePatterns.includes(pattern)) {
+          this.config.ignorePatterns.push(pattern);
+        }
+      }
+    }
+    
     // Get existing files if incremental
     const t0 = Date.now();
     const existingFiles = incremental 
@@ -555,6 +567,26 @@ export class Indexer {
           isBinary
         });
       }
+    }
+  }
+
+  /**
+   * Parse .gitmodules file and extract submodule paths
+   */
+  async _parseGitmodules(basePath) {
+    const gitmodulesPath = path.join(basePath, '.gitmodules');
+    try {
+      const content = await fs.readFile(gitmodulesPath, 'utf-8');
+      const paths = [];
+      const pathRegex = /^\s*path\s*=\s*(.+)$/gm;
+      let match;
+      while ((match = pathRegex.exec(content)) !== null) {
+        const subPath = match[1].trim().replace(/\\/g, '/');
+        paths.push(subPath);
+      }
+      return paths;
+    } catch {
+      return [];
     }
   }
 
