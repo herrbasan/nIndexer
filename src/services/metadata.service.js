@@ -112,14 +112,27 @@ export class SimpleMetadataStore {
 
   async searchKeyword(query, limit = 20) {
     const results = [];
-    const lowerQuery = query.toLowerCase();
+    const tokens = query.toLowerCase().split(/[\s._-]+/).filter(t => t.length >= 2);
+    const searchTerms = tokens.length > 0 ? tokens : [query.toLowerCase()];
     
     for (const [filePath, data] of Object.entries(this.cache.files)) {
       const lowerPath = filePath.toLowerCase();
       
-      if (lowerPath.includes(lowerQuery)) {
-        const score = lowerPath === lowerQuery ? 1.0 : 
-                lowerPath.split('/').pop().includes(lowerQuery) ? 0.8 : 0.5;
+      // Match paths that contain at least one of the search terms
+      let matchCount = 0;
+      let exactMatch = false;
+      const fileName = lowerPath.split('/').pop();
+      
+      for (const term of searchTerms) {
+        if (lowerPath.includes(term)) {
+          matchCount++;
+          if (lowerPath === term || fileName === term) exactMatch = true;
+        }
+      }
+      
+      if (matchCount > 0) {
+        // Score better if more terms match or if exact match
+        const score = exactMatch ? 1.0 : (matchCount / searchTerms.length) * 0.8;
         
         results.push({
           path: filePath,
@@ -127,8 +140,6 @@ export class SimpleMetadataStore {
           ...data
         });
       }
-      
-      if (results.length >= limit) break;
     }
     
     results.sort((a, b) => a.rank - b.rank);

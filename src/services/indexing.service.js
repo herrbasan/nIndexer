@@ -543,8 +543,11 @@ export class CodebaseIndexingService {
     let contentResults = [];
     if (searchContent) {
       try {
-        contentResults = await this.grepSearcher.grep(source, query, {
-          regex: false,
+        const tokens = query.split(/[\s._-]+/).filter(t => t.length >= 2);
+        const searchTerms = tokens.length > 0 ? tokens : [query];
+        
+        contentResults = await this.grepSearcher.grep(source, searchTerms.join('|'), {
+          regex: true,
           limit: limit * 2,
           maxMatchesPerFile: 1,
           caseSensitive: false,
@@ -659,7 +662,7 @@ export class CodebaseIndexingService {
   /**
    * Hybrid search - combines semantic + keyword + optional grep
    */
-  async search({ codebase, query, strategy = 'hybrid', limit = 10, filter }) {
+  async search({ codebase, query, strategy = 'hybrid', limit = 10, filter, queryEmbedding = null }) {
     const { collection, metadata, source } = await this._getCodebase(codebase);
     
     // Gather results based on strategy
@@ -671,7 +674,9 @@ export class CodebaseIndexingService {
     // Always do semantic for 'hybrid' and 'semantic' strategies
     if (strategy === 'hybrid' || strategy === 'semantic') {
       try {
-        const queryEmbedding = await this.router.embedText(query);
+        if (!queryEmbedding) {
+          queryEmbedding = await this.router.embedText(query);
+        }
         const rawResults = collection.search({
           vector: queryEmbedding,
           top_k: limit * 3,
@@ -788,13 +793,14 @@ export class CodebaseIndexingService {
   /**
    * Search for semantically similar code
    */
-  async searchSemantic({ codebase, query, limit = 10, filter }) {
+  async searchSemantic({ codebase, query, limit = 10, filter, queryEmbedding = null }) {
     const { collection, metadata } = await this._getCodebase(codebase);
 
     // Generate query embedding
-    let queryEmbedding;
     try {
-      queryEmbedding = await this.router.embedText(query);
+      if (!queryEmbedding) {
+        queryEmbedding = await this.router.embedText(query);
+      }
     } catch (err) {
       logger.warn(`Embedding unavailable for semantic search`, { 
         codebase, 
@@ -863,14 +869,27 @@ export class CodebaseIndexingService {
     // Filter out empty codebases (0 files) - these can't have results
     const validCodebases = allCodebases.filter(cb => cb.files > 0);
     
+    // Pre-calculate embedding once for the whole search to avoid concurrent LLM gateway flooding
+    let precomputedEmbedding = null;
+    if (strategy === 'hybrid' || strategy === 'semantic') {
+      try {
+        precomputedEmbedding = await this.router.embedText(query);
+      } catch (err) {
+        logger.warn(`Failed to precompute embedding for searchAll`, { error: err.message }, 'Search');
+      }
+    }
+
     const allResults = [];
     const errors = [];
     let resultsFound = 0;
     
+    // Whether to allow early exit (only valid for simple strategies where sorting by rank isn't required)
+    const canExitEarly = strategy === 'grep' || strategy === 'keyword';
+    
     // Helper to search a single codebase
     const searchOne = async (cb) => {
-      // Early termination check
-      if (resultsFound >= limit) return null;
+      // Early termination check for fast strategies
+      if (canExitEarly && resultsFound >= limit) return null;
       
       try {
         const searchLimit = Math.min(perCodebaseLimit, limit);
@@ -895,7 +914,8 @@ export class CodebaseIndexingService {
             codebase: cb.name, 
             query, 
             limit: searchLimit,
-            filter 
+            filter,
+            queryEmbedding: precomputedEmbedding
           });
         } else {
           // hybrid
@@ -904,16 +924,29 @@ export class CodebaseIndexingService {
             query, 
             strategy: 'hybrid', 
             limit: searchLimit,
-            filter 
+            filter,
+            queryEmbedding: precomputedEmbedding
           });
         }
         
-        if (results.results && results.results.length > 0) {
-          resultsFound += results.results.length;
+        // Normalize results from different methods
+        let resultsArray = [];
+        let count = 0;
+        
+        if (Array.isArray(results)) {
+          resultsArray = results;
+          count = results.length;
+        } else if (results && results.results) {
+          resultsArray = results.results;
+          count = results.count || results.results.length;
+        }
+
+        if (resultsArray.length > 0) {
+          resultsFound += resultsArray.length;
           return {
             codebase: cb.name,
-            count: results.count,
-            results: results.results.map(r => ({ ...r, codebase: cb.name }))
+            count,
+            results: resultsArray.map(r => ({ ...r, codebase: cb.name }))
           };
         }
       } catch (err) {
@@ -924,8 +957,8 @@ export class CodebaseIndexingService {
     
     // Process in batches for concurrency control
     for (let i = 0; i < validCodebases.length; i += concurrency) {
-      // Early termination if we have enough results
-      if (resultsFound >= limit) break;
+      // Early termination if we have enough results (only for fast search strategies)
+      if (canExitEarly && resultsFound >= limit) break;
       
       const batch = validCodebases.slice(i, i + concurrency);
       const batchResults = await Promise.all(batch.map(searchOne));

@@ -239,7 +239,7 @@ export class GrepSearcher {
       });
 
       rg.on('close', (code) => {
-        if (code === 0 || code === 1 || code === null) {
+        if (code === 0 || code === 1 || code === null || code === 2) {
           resolve(results);
         } else {
           reject(new Error('ripgrep failed: ' + (stderr || 'exit code ' + code)));
