@@ -726,19 +726,24 @@ export class CodebaseIndexingService {
         for (const g of contentResults) {
           if (!existingPaths.has(g.path)) {
             // Apply TF-IDF primitive heuristic based on token length/rarity to differentiate hits
-            let matchScore = 0.3; // Default baseline grep match score
+            let matchScore = 0.2; // Default baseline grep match score
             if (g.content) {
               const lowerContent = g.content.toLowerCase();
               let matchedTerms = 0;
               for (const term of searchTerms) {
                 if (lowerContent.includes(term.toLowerCase())) {
                   matchedTerms++;
-                  // Longer terms (e.g., 'ffmpeg', 'electron') have more weight than 'the', 'in'
-                  matchScore += (term.length * 0.05); 
+                  // Max term weight is capped so one long word (like 'electron') doesn't dominate
+                  matchScore += Math.min(term.length * 0.03, 0.15); 
                 }
               }
-              // Reward matches having multiple term occurrences concurrently in the line buffer
-              if (matchedTerms > 1) matchScore += 0.2; 
+              // Strong reward for multi-term matches (density)
+              if (matchedTerms > 1) {
+                matchScore += (matchedTerms / searchTerms.length) * 0.5;
+              } else if (searchTerms.length > 2) {
+                // Punish matches that only have 1 term out of a very long query
+                matchScore *= 0.5;
+              }
             }
             
             // Cap between a negative score value expected by the FTS5 normalizer

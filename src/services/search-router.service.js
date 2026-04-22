@@ -63,7 +63,10 @@ export class SearchRouter {
       let combinedScore = semanticPart + keywordPart;
 
       // Smart semantic overriding (Don't let low keyword score drag down an excellent semantic hit)
-      if (scores_data.semantic > 0.65) {
+      if (scores_data.semantic >= 0.70) {
+        // Absolute protection: An excellent semantic match must outrank a mediocre semantic+keyword match
+        combinedScore = Math.max(combinedScore, scores_data.semantic);
+      } else if (scores_data.semantic > 0.65) {
         combinedScore = Math.max(combinedScore, scores_data.semantic * 0.95);
       }
 
