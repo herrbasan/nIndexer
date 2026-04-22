@@ -46,7 +46,10 @@
       "*.svg",
       "*.pdf",
       "*.doc",
-      "*.docx"
+      "*.docx",
+      "**/data/codebases/**",
+      "**/data/trash/**",
+      "**/logs/**"
     ],
     "batchSize": 25,
     "indexBatchSize": 50

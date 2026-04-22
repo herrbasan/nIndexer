@@ -31,26 +31,53 @@ export class SearchRouter {
         const normalized = maxRank > 0 ? 1 - (Math.abs(r.rank) / maxRank) : 0;
         const existing = scores.get(r.path);
         if (existing) {
-          existing.keyword = normalized;
+          existing.keyword = Math.max(existing.keyword, normalized);
         } else {
           scores.set(r.path, { semantic: 0, keyword: normalized, data: { path: r.path } });
         }
       }
     }
 
-    // Calculate combined scores
+    // Calculate combined scores with smart penalties and boosts
     const combined = [];
     for (const [path, scores_data] of scores) {
-      const combinedScore = 
-        scores_data.semantic * weights.semantic +
-        scores_data.keyword * weights.keyword;
+      let penalty = 1.0;
+      const lowerPath = path.toLowerCase();
       
-      combined.push({
-        ...scores_data.data,
-        score: combinedScore,
-        semanticScore: scores_data.semantic,
-        keywordScore: scores_data.keyword
-      });
+      // Known boilerplate noise penalties
+      if (lowerPath.includes('node_modules') || lowerPath.includes('.git/')) {
+        penalty = 0.1;
+      } else if (lowerPath.includes('license') || lowerPath.endsWith('.license')) {
+        penalty = 0.2;
+      } else if (lowerPath.includes('copilot-instructions.md') || lowerPath.includes('agents.md')) {
+        penalty = 0.5;
+      } else if (lowerPath.endsWith('readme.md')) {
+        penalty = 0.8;
+      } else if (lowerPath.includes('package-lock.json') || lowerPath.includes('yarn.lock') || lowerPath.includes('cargo.lock')) {
+        penalty = 0.1;
+      }
+
+      // Base hybrid score
+      let semanticPart = scores_data.semantic * weights.semantic;
+      let keywordPart = scores_data.keyword * weights.keyword;
+      let combinedScore = semanticPart + keywordPart;
+
+      // Smart semantic overriding (Don't let low keyword score drag down an excellent semantic hit)
+      if (scores_data.semantic > 0.65) {
+        combinedScore = Math.max(combinedScore, scores_data.semantic * 0.95);
+      }
+
+      combinedScore *= penalty;
+
+      // Noise floor culling for cross-codebase scale
+      if (combinedScore >= 0.45) {
+        combined.push({
+          ...scores_data.data,
+          score: combinedScore,
+          semanticScore: scores_data.semantic * penalty,
+          keywordScore: scores_data.keyword * penalty
+        });
+      }
     }
 
     // Sort by combined score

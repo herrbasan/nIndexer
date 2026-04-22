@@ -725,7 +725,26 @@ export class CodebaseIndexingService {
         const existingPaths = new Set(keywordResults.map(r => r.path));
         for (const g of contentResults) {
           if (!existingPaths.has(g.path)) {
-            keywordResults.push({ path: g.path, rank: -0.3, source: 'content', match: g.content?.slice(0, 200) });
+            // Apply TF-IDF primitive heuristic based on token length/rarity to differentiate hits
+            let matchScore = 0.3; // Default baseline grep match score
+            if (g.content) {
+              const lowerContent = g.content.toLowerCase();
+              let matchedTerms = 0;
+              for (const term of searchTerms) {
+                if (lowerContent.includes(term.toLowerCase())) {
+                  matchedTerms++;
+                  // Longer terms (e.g., 'ffmpeg', 'electron') have more weight than 'the', 'in'
+                  matchScore += (term.length * 0.05); 
+                }
+              }
+              // Reward matches having multiple term occurrences concurrently in the line buffer
+              if (matchedTerms > 1) matchScore += 0.2; 
+            }
+            
+            // Cap between a negative score value expected by the FTS5 normalizer
+            matchScore = Math.min(matchScore, 0.95);
+            
+            keywordResults.push({ path: g.path, rank: -matchScore, source: 'content', match: g.content?.slice(0, 200) });
             existingPaths.add(g.path);
           }
         }
@@ -862,7 +881,7 @@ export class CodebaseIndexingService {
   /**
    * Search across ALL codebases - optimized with parallel processing
    */
-  async searchAll({ query, strategy = 'hybrid', limit = 10, filter, perCodebaseLimit = 5, concurrency = 10 }) {
+  async searchAll({ query, strategy = 'hybrid', limit = 10, filter, perCodebaseLimit = 5, concurrency = 20 }) {
     const startTime = Date.now();
     const allCodebases = await this.listCodebases();
     
