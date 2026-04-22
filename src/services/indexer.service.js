@@ -247,6 +247,14 @@ export class Indexer {
     for (let i = 0; i < embeddableFiles.length; i += EMBED_BATCH_SIZE) {
       if (this.cancelled) throw new Error('Indexing cancelled');
       
+      if (!this.router.embedAvailable) {
+        logger.warn(`Embedding service unavailable, stopping index at ${embeddings.length}/${embeddableFiles.length} files`, {
+          embedded: embeddings.length,
+          total: embeddableFiles.length
+        }, 'Indexer');
+        break;
+      }
+
       const batch = embeddableFiles.slice(i, i + EMBED_BATCH_SIZE);
       const texts = batch.map(p => p.embeddingText);
       
@@ -264,7 +272,16 @@ export class Indexer {
           });
         }
       } catch (err) {
+        if (!this.router.embedAvailable) {
+          logger.warn(`Embedding service became unavailable during batch, stopping`, {
+            embedded: embeddings.length,
+            total: embeddableFiles.length
+          }, 'Indexer');
+          break;
+        }
+
         for (const item of batch) {
+          if (!this.router.embedAvailable) break;
           try {
             const bt0 = Date.now();
             const vector = await this.router.embedText(item.embeddingText);
@@ -273,8 +290,6 @@ export class Indexer {
           } catch (e) {
             errors.push({ file: item.relativePath, error: e.message });
             embedFailedFiles.push(item.relativePath);
-            // DON'T update metadata - leave existing vector/state intact
-            // This preserves embeddings from previous successful indexing
             logger.debug(`Skipping file due to embedding error`, { path: item.relativePath, error: e.message }, 'Indexer');
           }
         }

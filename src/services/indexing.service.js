@@ -209,6 +209,7 @@ export class CodebaseIndexingService {
           
           codebases.push({
             name: entry.name,
+            folderName: metadata?.folderName || null,
             source: metadata?.source || null,
             files: metadata?.fileCount || 0,
             lastIndexed: metadata?.lastIndexed || null,
@@ -312,6 +313,7 @@ export class CodebaseIndexingService {
     await this._saveCodebaseMetadata(name, {
       name,
       source,
+      folderName: args.folderName || path.basename(source),
       createdAt: new Date().toISOString(),
       lastIndexed: null,
       status: 'indexing',
@@ -326,6 +328,7 @@ export class CodebaseIndexingService {
     await this._saveCodebaseMetadata(name, {
       name,
       source,
+      folderName: args.folderName || path.basename(source),
       createdAt: new Date().toISOString(),
       lastIndexed: new Date().toISOString(),
       status: result.errors > 0 ? 'partial' : 'current',
@@ -1061,20 +1064,11 @@ export class CodebaseIndexingService {
     if (codebase) {
       return this._runMaintenanceOnCodebase(codebase, reindex);
     } else {
-      const configCodebases = await this._getAllConfiguredCodebases();
       const indexedCodebases = await this.listCodebases();
-      const indexedNames = new Set(indexedCodebases.map(cb => cb.name));
       const results = [];
 
       for (const cb of indexedCodebases) {
-        if (!configCodebases.has(cb.name)) {
-          const result = await this._runMaintenanceOnCodebase(cb.name, reindex);
-          results.push(result);
-        }
-      }
-
-      for (const name of configCodebases) {
-        const result = await this._runMaintenanceOnCodebase(name, reindex);
+        const result = await this._runMaintenanceOnCodebase(cb.name, reindex);
         results.push(result);
       }
 
@@ -1087,20 +1081,6 @@ export class CodebaseIndexingService {
   }
 
   /**
-   * Get all codebase names from config
-   */
-  async _getAllConfiguredCodebases() {
-    try {
-      const configPath = path.join(process.cwd(), 'data', 'codebases.json');
-      const raw = await fs.readFile(configPath, 'utf8');
-      const codebasesConfig = JSON.parse(raw);
-      return new Set(Object.keys(codebasesConfig.codebases || {}));
-    } catch {
-      return new Set();
-    }
-  }
-
-  /**
    * Run maintenance on a single codebase
    */
   async _runMaintenanceOnCodebase(codebaseName, reindexMode) {
@@ -1108,24 +1088,8 @@ export class CodebaseIndexingService {
     const indexedCodebase = codebases.find(cb => cb.name === codebaseName);
     const exists = !!indexedCodebase;
 
-    const configSource = await this._getCodebaseSourcePath(codebaseName);
-    const orphaned = exists && !configSource;
-
-    if (orphaned) {
-      const result = await this.removeCodebase({ name: codebaseName });
-      return { codebase: codebaseName, action: 'orphaned_removed', ...result };
-    }
-
     if (!exists) {
-      if (reindexMode === 'if_missing' || reindexMode === 'always' || reindexMode === true) {
-        if (!configSource) {
-          return { codebase: codebaseName, error: 'Codebase not found in configuration' };
-        }
-        const result = await this.indexCodebase({ name: codebaseName, source: configSource });
-        return { codebase: codebaseName, action: 'indexed', ...result };
-      } else {
-        return { codebase: codebaseName, error: 'Codebase not indexed. Use reindex:"if_missing" to build.' };
-      }
+      return { codebase: codebaseName, error: 'Codebase not indexed' };
     }
 
     if (reindexMode === 'always') {
@@ -1136,20 +1100,6 @@ export class CodebaseIndexingService {
     const changeResult = await this.maintenance.checkAndRefresh(codebaseName);
 
     return { codebase: codebaseName, action: changeResult.reason, ...changeResult };
-  }
-
-  /**
-   * Get source path for a codebase from codebases.json
-   */
-  async _getCodebaseSourcePath(codebaseName) {
-    try {
-      const configPath = path.join(process.cwd(), 'data', 'codebases.json');
-      const raw = await fs.readFile(configPath, 'utf8');
-      const codebasesConfig = JSON.parse(raw);
-      return codebasesConfig.codebases?.[codebaseName] || null;
-    } catch {
-      return null;
-    }
   }
 
   /**

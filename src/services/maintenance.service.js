@@ -17,11 +17,12 @@ const logger = getLogger();
 export class CodebaseMaintenance {
   constructor(service, config = {}) {
     this.service = service;
+    this.discoveryService = null;
     this.config = {
       enabled: true,
-      intervalMs: 900000, // 15 minutes default
+      intervalMs: 900000,
       autoRefresh: true,
-      staleThresholdMs: 300000, // 5 minutes - consider index stale if file changed this recently
+      staleThresholdMs: 300000,
       ...config
     };
     this.intervalId = null;
@@ -32,6 +33,10 @@ export class CodebaseMaintenance {
       filesUpdated: 0,
       errors: 0
     };
+  }
+
+  setDiscoveryService(discoveryService) {
+    this.discoveryService = discoveryService;
   }
 
   /**
@@ -72,37 +77,18 @@ export class CodebaseMaintenance {
     const startTime = Date.now();
     
     try {
+      // Re-run discovery to pick up new/removed folders
+      if (this.discoveryService) {
+        try {
+          await this.discoveryService.scanAndSync();
+        } catch (err) {
+          logger.error(`Discovery during maintenance failed`, err, {}, 'Maintenance');
+        }
+      }
+
       const t0 = Date.now();
       const codebases = await this.service.listCodebases();
       logger.debug(`List codebases`, { durationMs: Date.now() - t0, count: codebases.length }, 'Maintenance');
-
-      // Index any configured but not-yet-indexed codebases
-      const indexedNames = new Set(codebases.map(cb => cb.name));
-      const configuredNames = await this.service._getAllConfiguredCodebases();
-      
-      for (const name of configuredNames) {
-        if (!indexedNames.has(name)) {
-          try {
-            const cbStart = Date.now();
-            logger.info(`Auto-indexing new codebase`, { name }, 'Maintenance');
-            const source = await this.service._getCodebaseSourcePath(name);
-            if (source) {
-              await this.service.indexCodebase({ name, source }, (progress) => {
-                if (progress.phase === 'error') {
-                  logger.error(`Auto-index progress error`, { name, message: progress.message }, 'Maintenance');
-                }
-              });
-              const cbDuration = Date.now() - cbStart;
-              logger.info(`Auto-index complete`, { name, durationMs: cbDuration }, 'Maintenance');
-            } else {
-              logger.warn(`Auto-index skipped - no source path`, { name }, 'Maintenance');
-            }
-          } catch (err) {
-            logger.error(`Auto-index failed`, err, { name }, 'Maintenance');
-            this.stats.errors++;
-          }
-        }
-      }
 
       // Refresh already-indexed codebases
       for (const cb of codebases) {

@@ -34,10 +34,14 @@ if (!config.llm) config.llm = {};
 if (!config.llm.gatewayWsUrl) config.llm.gatewayWsUrl = 'ws://localhost:3400/v1/realtime';
 if (!config.llm.gatewayHttpUrl) config.llm.gatewayHttpUrl = 'http://localhost:3400';
 
-// Set default logs directory if not configured
-if (!config.logs?.dir) {
-  if (!config.logs) config.logs = {};
-  config.logs.dir = path.join(__dirname, '..', 'logs');
+const projectRoot = path.join(__dirname, '..');
+
+if (!config.storage.trashDir) {
+  config.storage.trashDir = path.join(projectRoot, 'data', 'trash');
+}
+
+if (config.discovery?.roots) {
+  config.discovery.roots = config.discovery.roots.map(r => r.replace(/\/$/, '').replace(/\\$/, ''));
 }
 
 export { config };

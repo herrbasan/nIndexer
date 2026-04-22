@@ -10,6 +10,7 @@ import { createHash, randomUUID } from 'crypto';
 import { config } from './config.js';
 import { LLMClient } from './llm-client.js';
 import { init as initIndexingService, shutdown as shutdownIndexingService } from './services/indexing.service.js';
+import { DiscoveryService } from './services/discovery.service.js';
 import { createRouter } from './api/router.js';
 import { getLogger } from './utils/logger.js';
 
@@ -23,6 +24,7 @@ let server;
 let router;
 let llmClient;
 let indexingService;
+let discoveryService;
 
 // WebSocket opcodes
 const WS_OPCODE_TEXT = 0x01;
@@ -173,6 +175,7 @@ async function main() {
   // Initialize the indexing service
   const serviceConfig = {
     ...config.indexing,
+    trashDir: config.storage.trashDir,
     spaces: config.spaces,
     maintenance: config.maintenance
   };
@@ -180,6 +183,12 @@ async function main() {
     config: { codebase: serviceConfig },
     gateway: llmClient
   });
+
+  if (config.discovery?.roots?.length > 0) {
+    discoveryService = new DiscoveryService(indexingService, config.discovery);
+    indexingService.maintenance.setDiscoveryService(discoveryService);
+    discoveryService.start();
+  }
 
   // Create WebSocket router
   router = createRouter(indexingService);
@@ -282,6 +291,9 @@ async function shutdown() {
 
   // Close all client connections
   router?.closeAll();
+
+  // Stop discovery
+  discoveryService?.stop();
 
   // Shutdown indexing service
   await shutdownIndexingService?.();

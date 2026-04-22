@@ -17,10 +17,37 @@ export class LLMClient {
     this._isClosed = false;
     this._reconnectAttempts = 0;
     this._connect();
+
+    this._embedCircuitOpen = false;
+    this._embedFailCount = 0;
+    this._embedCircuitResetAt = 0;
   }
 
   get connected() {
     return this._ws && this._ws.readyState === WebSocket.OPEN;
+  }
+
+  get embedAvailable() {
+    if (!this._embedCircuitOpen) return true;
+    if (Date.now() >= this._embedCircuitResetAt) {
+      this._embedCircuitOpen = false;
+      this._embedFailCount = 0;
+      logger.info(`Embedding circuit breaker reset`, {}, 'LLMClient');
+      return true;
+    }
+    return false;
+  }
+
+  _tripEmbedCircuit() {
+    this._embedFailCount++;
+    if (this._embedFailCount >= 3) {
+      this._embedCircuitOpen = true;
+      this._embedCircuitResetAt = Date.now() + 60000;
+      logger.warn(`Embedding circuit breaker tripped`, {
+        failCount: this._embedFailCount,
+        retryAfterMs: 60000
+      }, 'LLMClient');
+    }
   }
 
   _connect() {
@@ -81,25 +108,49 @@ export class LLMClient {
   }
 
   async embedText(text) {
-    const res = await fetch(`${this.httpUrl}/v1/embeddings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ input: text, task: 'embed' })
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-    const data = await res.json();
-    return data.data[0].embedding;
+    if (!this.embedAvailable) throw new Error('Embedding service unavailable (circuit breaker open)');
+    try {
+      const res = await fetch(`${this.httpUrl}/v1/embeddings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: text, task: 'embed' })
+      });
+      if (!res.ok) {
+        this._tripEmbedCircuit();
+        throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      }
+      const data = await res.json();
+      this._embedFailCount = 0;
+      return data.data[0].embedding;
+    } catch (err) {
+      if (err.message !== 'Embedding service unavailable (circuit breaker open)') {
+        this._tripEmbedCircuit();
+      }
+      throw err;
+    }
   }
 
   async embedBatch(texts) {
-    const res = await fetch(`${this.httpUrl}/v1/embeddings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ input: texts, task: 'embed' })
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-    const data = await res.json();
-    return data.data.map(d => d.embedding);
+    if (!this.embedAvailable) throw new Error('Embedding service unavailable (circuit breaker open)');
+    try {
+      const res = await fetch(`${this.httpUrl}/v1/embeddings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: texts, task: 'embed' })
+      });
+      if (!res.ok) {
+        this._tripEmbedCircuit();
+        throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      }
+      const data = await res.json();
+      this._embedFailCount = 0;
+      return data.data.map(d => d.embedding);
+    } catch (err) {
+      if (err.message !== 'Embedding service unavailable (circuit breaker open)') {
+        this._tripEmbedCircuit();
+      }
+      throw err;
+    }
   }
 
   async predict({ prompt, systemPrompt, taskType, temperature, maxTokens, responseFormat }) {

@@ -9,7 +9,7 @@ A WebSocket-first microservice for vector-based semantic search, keyword indexin
 ## Quick Start
 
 ```bash
-# Start the server
+# Start the server (from any directory)
 node src/server.js
 
 # Server runs at:
@@ -40,12 +40,47 @@ node src/server.js
 │              CodebaseIndexingService                        │
 │                  (src/services/)                            │
 │                                                             │
-│  Indexer ──────► nVDB (Rust vector DB)                     │
+│  Discovery ───► Auto-discovers projects from root folders  │
+│  Indexer ─────► nVDB (Rust vector DB)                      │
 │  Metadata ────► SimpleMetadataStore (JSON)                 │
 │  Grep ────────► ripgrep process                            │
 │  LLM ─────────► LLM Gateway (HTTP/WS)                      │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Auto-Discovery
+
+nIndexer automatically discovers and indexes projects from configured root directories. No manual codebase registration needed.
+
+### How it works
+
+1. Scans immediate child folders of each configured root directory
+2. Converts folder names to snake_case identifiers (e.g. `MyProject` → `my_project`)
+3. Deduplicates by folder name — if the same project exists in multiple roots, the one with the most recent mtime wins
+4. Indexes all discovered folders that contain indexable files
+5. Folders with zero indexable files are removed from the index
+6. Re-scans periodically (configurable interval) and on each maintenance cycle
+
+### Configuration
+
+```json
+{
+  "discovery": {
+    "roots": [
+      "\\\\coolkid\\Work\\Work\\_GIT\\",
+      "\\\\BADKID\\Stuff\\DEV\\"
+    ],
+    "scanIntervalMs": 3600000
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `roots` | string[] | Root directories to scan for projects |
+| `scanIntervalMs` | number | Re-scan interval in ms (default: 3600000 = 1 hour) |
 
 ---
 
@@ -104,8 +139,7 @@ Index a new codebase for semantic search.
 ```json
 {
   "name": "my-project",
-  "source": "//server/share/path/to/project",
-  "analyze": false
+  "source": "//server/share/path/to/project"
 }
 ```
 
@@ -113,7 +147,7 @@ Index a new codebase for semantic search.
 |-------|------|----------|-------------|
 | `name` | string | Yes | Codebase identifier |
 | `source` | string | Yes | UNC path or absolute local path |
-| `analyze` | boolean | No | Run LLM analysis after indexing (default: false) |
+| `folderName` | string | No | Original folder name (set automatically by discovery) |
 
 **Response:**
 ```json
@@ -123,10 +157,11 @@ Index a new codebase for semantic search.
   "indexed": 125,
   "errors": 0,
   "duration": 10135,
-  "rate": 12.33,
-  "analysis": null
+  "rate": 12.33
 }
 ```
+
+> **Note:** Manual indexing is still available but typically unnecessary — discovery handles this automatically.
 
 ---
 
@@ -135,20 +170,18 @@ Incrementally update a codebase's index.
 
 ```json
 {
-  "name": "my-project",
-  "analyze": false
+  "name": "my-project"
 }
 ```
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | Yes | Codebase name |
-| `analyze` | boolean | No | Re-run LLM analysis if stale |
 
 ---
 
 #### `remove_codebase`
-Remove a codebase from the index. Moved to `data/trash/` by default (can be recovered).
+Remove a codebase from the index. Moved to `trashDir` by default (can be recovered).
 
 ```json
 {
@@ -160,7 +193,7 @@ Remove a codebase from the index. Moved to `data/trash/` by default (can be reco
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | Yes | Codebase name |
-| `permanent` | boolean | No | If `true`, permanently delete. If `false` (default), move to `data/trash/` |
+| `permanent` | boolean | No | If `true`, permanently delete. If `false` (default), move to trash |
 
 ---
 
@@ -227,7 +260,7 @@ Fast indexed keyword search. Best for exact matches on names.
 ```json
 {
   "codebase": "my-project",
-  "query": " authenticate",
+  "query": "authenticateUser",
   "limit": 20,
   "searchContent": true
 }
@@ -340,7 +373,7 @@ List files in a directory.
 ### Analysis
 
 #### `analyze_codebase`
-Run LLM analysis to generate project description.
+Run heuristic analysis to generate project description. No LLM required.
 
 ```json
 {
@@ -362,7 +395,7 @@ Run LLM analysis to generate project description.
 ---
 
 #### `get_codebase_description`
-Get LLM-generated description with staleness check.
+Get project description with staleness check.
 
 ```json
 {
@@ -432,56 +465,25 @@ Check staleness status of a codebase.
 ---
 
 #### `run_maintenance`
-Run maintenance with configurable options for indexing and analysis.
+Run maintenance cycle. Discovery re-scans roots before maintenance runs.
 
 ```json
 {
   "codebase": "my-project",
-  "reindex": "if_missing",
-  "analyze": true
+  "reindex": "if_missing"
 }
 ```
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
 | `codebase` | string | No | Specific codebase to maintain (omit for all) |
-| `reindex` | string | No | Reindex mode: `"if_missing"` (build if not exists), `"changed"` (update existing), `"always"` (rebuild), `null` (check only) |
-| `analyze` | boolean | No | Run LLM analysis after indexing/changes (default: false) |
+| `reindex` | string | No | Reindex mode: `"if_missing"`, `"changed"`, `"always"`, `null` |
 
 **Reindex Modes:**
-- `null` (default) - Check for changes only. If codebase doesn't exist, return error.
-- `"if_missing"` - Check for changes; if codebase not indexed, build from `data/codebases.json` source.
-- `"changed"` - Check for changes and update only (like refresh).
-- `"always"` - Force rebuild of existing index.
-
-**Orphaned Codebases:**
-If an indexed codebase is no longer in `data/codebases.json`, it will be automatically moved to `data/trash/`.
-
-**Common Usage Patterns:**
-
-```json
-// Smart maintenance: build if missing, check changes if exists, analyze after
-{
-  "codebase": "my-project",
-  "reindex": "if_missing",
-  "analyze": true
-}
-
-// Quick sync: only check and update changed files
-{
-  "codebase": "my-project",
-  "reindex": "changed"
-}
-
-// Full rebuild with analysis
-{
-  "codebase": "my-project",
-  "reindex": "always",
-  "analyze": true
-}
-```
-
-Omit `codebase` to run on all codebases in `data/codebases.json`.
+- `null` (default) - Check for changes only
+- `"if_missing"` - Build index if it doesn't exist
+- `"changed"` - Update only changed files
+- `"always"` - Force rebuild of existing index
 
 ---
 
@@ -521,55 +523,80 @@ List all indexed codebases.
 ```json
 [
   {
-    "name": "llm_gateway",
-    "source": "//BADKID/Stuff/DEV/LLM Gateway",
+    "name": "my_project",
+    "folderName": "MyProject",
+    "source": "\\\\server\\share\\MyProject",
     "files": 125,
     "lastIndexed": "2026-03-27T17:04:35.738Z",
     "status": "current",
-    "hasAnalysis": true
+    "description": "A stateless API gateway...",
+    "hasAnalysis": true,
+    "analysisStale": false
   }
 ]
 ```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Snake_case identifier |
+| `folderName` | string | Original folder name |
+| `source` | string | Absolute source path |
+| `files` | number | Total indexed files |
+| `lastIndexed` | string | Last index timestamp |
+| `status` | string | `current`, `partial`, `indexing`, `unknown` |
+| `description` | string | Project description (if analyzed) |
+| `hasAnalysis` | boolean | Whether analysis has been run |
+| `analysisStale` | boolean | Whether analysis is outdated |
 
 ---
 
 ## Configuration
 
-### `data/codebases.json`
-
-Defines codebases to index.
-
-```json
-{
-  "codebases": {
-    "my-project": "//server/share/path/to/project",
-    "other-project": "d:/projects/other"
-  }
-}
-```
-
 ### `config.json`
 
-Service configuration.
+Service configuration. All paths should be absolute.
 
 ```json
 {
   "service": {
     "host": "localhost",
-    "port": 3666
+    "port": 3666,
+    "cors": false
   },
   "storage": {
-    "dataDir": "./data/codebases"
+    "dataDir": "D:\\DEV\\nIndexer\\data\\codebases",
+    "trashDir": "D:\\DEV\\nIndexer\\data\\trash"
+  },
+  "logs": {
+    "dir": "D:\\DEV\\nIndexer\\logs",
+    "retentionDays": 7
   },
   "indexing": {
-    "embeddingDimension": 768,
+    "embeddingDimension": 3072,
     "maxFileSize": 1048576,
-    "ignorePatterns": ["node_modules", ".git", "dist"],
-    "batchSize": 25
+    "ignorePatterns": [
+      "**/node_modules/**",
+      "**/.git/**",
+      "**/dist/**",
+      "**/build/**",
+      "**/bin/**",
+      "**/.vscode/**",
+      "**/coverage/**"
+    ],
+    "batchSize": 25,
+    "indexBatchSize": 50
   },
   "maintenance": {
     "enabled": true,
-    "intervalMs": 3600000
+    "intervalMs": 900000,
+    "autoRefresh": true
+  },
+  "discovery": {
+    "roots": [
+      "\\\\coolkid\\Work\\Work\\_GIT\\",
+      "\\\\BADKID\\Stuff\\DEV\\"
+    ],
+    "scanIntervalMs": 3600000
   },
   "llm": {
     "gatewayWsUrl": "ws://localhost:3400/v1/realtime",
@@ -577,6 +604,41 @@ Service configuration.
   }
 }
 ```
+
+### Configuration Fields
+
+| Section | Field | Type | Description |
+|---------|-------|------|-------------|
+| `service` | `host` | string | Bind host (default: `localhost`) |
+| `service` | `port` | number | Bind port (default: `3666`) |
+| `service` | `cors` | boolean | Enable CORS (default: `false`) |
+| `storage` | `dataDir` | string | Absolute path for indexed codebase data |
+| `storage` | `trashDir` | string | Absolute path for removed codebases |
+| `logs` | `dir` | string | Absolute path for log files |
+| `logs` | `retentionDays` | number | Days to keep session logs (default: `7`) |
+| `indexing` | `embeddingDimension` | number | Embedding vector dimension (default: `3072`) |
+| `indexing` | `maxFileSize` | number | Max file size in bytes (default: `1048576`) |
+| `indexing` | `ignorePatterns` | string[] | Glob patterns to exclude |
+| `indexing` | `batchSize` | number | Embedding batch size (default: `25`) |
+| `indexing` | `indexBatchSize` | number | DB insert batch size (default: `50`) |
+| `maintenance` | `enabled` | boolean | Enable periodic maintenance (default: `true`) |
+| `maintenance` | `intervalMs` | number | Maintenance interval in ms (default: `900000`) |
+| `maintenance` | `autoRefresh` | boolean | Auto-refresh stale codebases (default: `true`) |
+| `discovery` | `roots` | string[] | Root directories to scan for projects |
+| `discovery` | `scanIntervalMs` | number | Discovery re-scan interval in ms (default: `3600000`) |
+| `llm` | `gatewayWsUrl` | string | LLM Gateway WebSocket URL |
+| `llm` | `gatewayHttpUrl` | string | LLM Gateway HTTP URL |
+
+---
+
+## Embedding Circuit Breaker
+
+The LLM client includes a circuit breaker that stops indexing when the embedding service is unavailable:
+
+- After 3 consecutive embedding failures, the circuit breaker trips for 60 seconds
+- Pending indexing batches are gracefully stopped (already-embedded files are still stored)
+- Discovery defers indexing new codebases until the circuit resets
+- The circuit auto-resets after the cooldown period
 
 ---
 
@@ -586,13 +648,12 @@ Service configuration.
 const ws = new WebSocket('ws://localhost:3666');
 
 ws.onopen = () => {
-  // Search example
   ws.send(JSON.stringify({
     jsonrpc: '2.0',
     id: '1',
     method: 'search',
     params: {
-      codebase: 'llm_gateway',
+      codebase: 'my_project',
       query: 'websocket connection handling',
       limit: 5
     }
@@ -607,30 +668,6 @@ ws.onmessage = (e) => {
     console.error('Error:', response.error);
   }
 };
-```
-
----
-
-## Example Client (Python)
-
-```python
-import asyncio
-import json
-import websockets
-
-async def main():
-    uri = "ws://localhost:3666"
-    async with websockets.connect(uri) as ws:
-        await ws.send(json.dumps({
-            "jsonrpc": "2.0",
-            "id": "1",
-            "method": "list_codebases",
-            "params": {}
-        }))
-        response = await ws.recv()
-        print(json.loads(response))
-
-asyncio.run(main())
 ```
 
 ---
@@ -692,36 +729,27 @@ curl http://localhost:3666/health
 ```
 nIndexer/
 ├── src/
-│   ├── server.js              # WebSocket/HTTP server
+│   ├── server.js                          # WebSocket/HTTP server
 │   ├── api/
-│   │   └── router.js         # JSON-RPC message routing
+│   │   └── router.js                      # JSON-RPC message routing
 │   ├── services/
-│   │   ├── indexing.service.js    # Main service
-│   │   ├── indexer.service.js     # File walking, embedding
-│   │   ├── search-router.service.js # Hybrid search
-│   │   ├── grep.service.js        # ripgrep integration
-│   │   ├── metadata.service.js    # JSON metadata store
-│   │   └── ...
-│   ├── llm-client.js          # LLM Gateway client
-│   └── config.js              # Config loader
-├── nVDB/                      # Rust vector DB (submodule)
+│   │   ├── indexing.service.js            # Main service
+│   │   ├── indexer.service.js             # File walking, embedding
+│   │   ├── discovery.service.js           # Auto-discovery from root folders
+│   │   ├── maintenance.service.js         # Periodic maintenance
+│   │   ├── search-router.service.js       # Hybrid search
+│   │   ├── grep.service.js                # ripgrep integration
+│   │   ├── metadata.service.js            # JSON metadata store
+│   │   └── project-analyzer.service.js    # Heuristic codebase analysis
+│   ├── llm-client.js                      # LLM Gateway client (with circuit breaker)
+│   └── config.js                          # Config loader
+├── nVDB/                                  # Rust vector DB (submodule)
+├── nLogger/                               # Logging utility (submodule)
 ├── data/
-│   ├── codebases/             # Indexed data (gitignored)
-│   └── codebases.json         # Codebase definitions
-└── config.json                # Service config
-```
-
----
-
-## CLI Usage
-
-```bash
-# Start server
-node src/server.js
-
-# Development mode (auto-reload)
-npm run dev
-
-# Or with npm
-npm start
+│   ├── codebases/                         # Indexed data (per-codebase subdirs)
+│   └── trash/                             # Removed codebases
+├── logs/                                  # Session + rolling main logs
+├── config.json                            # Service configuration
+└── documentation/
+    └── nIndexer_documentation.md          # This file
 ```
