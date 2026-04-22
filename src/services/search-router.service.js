@@ -55,6 +55,8 @@ export class SearchRouter {
         penalty = 0.8;
       } else if (lowerPath.includes('package-lock.json') || lowerPath.includes('yarn.lock') || lowerPath.includes('cargo.lock')) {
         penalty = 0.1;
+      } else if (lowerPath.endsWith('package.json') || lowerPath.endsWith('cargo.toml') || lowerPath.endsWith('composer.json')) {
+        penalty = 0.3; // Manifest files are rarely the code users are searching for
       }
 
       // Base hybrid score
