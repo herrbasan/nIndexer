@@ -43,8 +43,8 @@ To eliminate "index staleness" during an active coding session:
 
 ## 5. Embeddings: OpenAI-Compatible Target & "Batteries Included"
 Real-time indexing dictates that embeddings must be free and incredibly fast. Hitting cloud-based OpenAI models for every `CTRL+S` sequence would quickly drain API budgets.
-- **OpenAI-Compatible Target:** For complete cross-platform flexibility (Linux/macOS), `nIndexer` configures natively to any standard OpenAI-compatible embedding endpoint (e.g., LM Studio, Ollama, native OpenAI API). User simply provides standard endpoint details (`host`, `model_name`).
-- **"Batteries Included" (Windows Only):** For Windows power-users, `nIndexer` will optionally bundle the precompiled `llama_server.exe` binary (borrowed from the `llama-cpp-gateway` project), removing almost all onboarding friction by providing a zero-config, out-of-the-box local vector model.
+- **Primary Workflow (OpenAI-Compatible Target):** `nIndexer` assumes the user will provide a standard OpenAI-compatible embedding endpoint (e.g., LM Studio, Ollama, vLLM, or native OpenAI API). The user simply configures standard endpoint details (`host`, `model_name`). This ensures complete cross-platform flexibility and lets users leverage their existing local LLM infrastructure.
+- **Convenience Fallback (Windows Only):** As a fallback for Windows users without an existing local AI stack, `nIndexer` will include a vendor script to pull down the precompiled `llama_server.exe` binary from the `llama-cpp-gateway` project. It will seamlessly spawn this binary to provide a zero-config, "batteries included" local vector model.
 - **Zero Cost & Zero Latency:** Pointing to local inference allows infinite document updates without API billing, completing local-to-local HTTP requests in milliseconds.
 - **Privacy:** Enterprise/proprietary code never leaves the host machine for generating vector hashes.
 
