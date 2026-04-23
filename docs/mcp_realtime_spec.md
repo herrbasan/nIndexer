@@ -19,24 +19,15 @@ Accompanied by this structural shift are two major feature additions:
 
 ---
 
-## 3. Operational Modes
-`nIndexer` will support two distinct execution paths to cater to different developer workflows:
+## 3. Operational Model: Multi-Codebase & JIT Indexing
+Instead of restricting the service to a "single codebase" standalone mode, `nIndexer` will operate globally as an always-on **Multi-Codebase Server**. It will serve both the custom WebSocket API for existing integrations while simultaneously providing an MCP-compatible endpoint.
 
-### Path A: Single-Codebase Mode (Standalone)
-Designed to be spun up per-project continuously by an IDE or AI client.
-- **Trigger:** Launched via a command like `nindexer --mode single --path .`
-- **Scope:** Binds completely to the current workspace directory.
-- **State:** Stores its `nVDB` index in a local `.nindexer/` hidden folder (or a centralized but project-hashed OS temp directory).
-- **Lifecycle:** Ephemeral or bound to the lifecycle of the IDE. Starts when the project opens, stops when closed.
-- **Advantages:** Perfect isolation, zero global configuration necessary, instantly plug-and-play for any new repository.
-
-### Path B: Multi-Codebase Mode (Daemon)
-The current operational model, enhanced for standard MCP.
-- **Trigger:** Launched globally (e.g., `nindexer --mode daemon`).
-- **Scope:** Scans configured root directories for multiple projects globally.
-- **State:** Stores all `nVDB` indices in a centralized `data/codebases/` directory.
-- **Lifecycle:** Always-on background service.
-- **Advantages:** Allows an AI agent to search across *all* of the developer's projects simultaneously (e.g., retrieving references from an older project into the current one).
+### Just-In-Time (JIT) Indexing Workflow
+Designed for completely frictionless integration with an AI client (like an IDE chat extension):
+- **Querying:** An LLM invokes a search tool on a specific codebase or directory path.
+- **Missing Index Handling:** If the codebase is not yet indexed, the server does not fail outright. Instead, it returns a descriptive message to the LLM indicating that the codebase hasn't been scanned, pointing the LLM to the available `index_codebase` tool.
+- **Autonomous Indexing:** The LLM can then autonomously (or after prompting the user) invoke the `index_codebase` tool to build the index on the fly.
+- **Result:** Zero manual configuration. The AI seamlessly handles discovery and indexing organically as part of the conversation.
 
 ---
 
@@ -62,6 +53,6 @@ Real-time indexing dictates that embeddings must be free and incredibly fast. Hi
 
 ## 6. Implementation Roadmap
 1. **MCP Protocol Layer:** Implement standard `stdio` MCP transport alongside the existing WS routes, converting the current API map into standard MCP tool schemas.
-2. **CLI & Bootstrapping:** Program the initialization logic to accept `--mode single` vs `--mode daemon` flags.
+2. **Just-In-Time Indexing Flow:** Adjust search endpoints to return soft-fail responses with `index_codebase` recommendations when targeting an unindexed path.
 3. **LLM Gateway Pivot:** Configure `llm-client.js` to natively understand and route requests to `llama-cpp-gateway`.
 4. **Watch Listeners:** Attach file watchers to the loaded codebase directories and hook them directly into the current `indexer.service.js` single-file update methods.
