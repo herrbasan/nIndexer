@@ -44,7 +44,7 @@ To eliminate "index staleness" during an active coding session:
 ## 5. Embeddings: OpenAI-Compatible Target & "Batteries Included"
 Real-time indexing dictates that embeddings must be free and incredibly fast. Hitting cloud-based OpenAI models for every `CTRL+S` sequence would quickly drain API budgets.
 - **OpenAI-Compatible Target:** For complete cross-platform flexibility (Linux/macOS), `nIndexer` configures natively to any standard OpenAI-compatible embedding endpoint (e.g., LM Studio, Ollama, native OpenAI API). User simply provides standard endpoint details (`host`, `model_name`).
-- **"Batteries Included" (Windows Only):** For Windows power-users, `nIndexer` will optionally integrate perfectly with the local `llama-cpp-gateway` precompiled wrapper, removing almost all onboarding friction by providing a zero-config, out-of-the-box local vector model.
+- **"Batteries Included" (Windows Only):** For Windows power-users, `nIndexer` will optionally bundle the precompiled `llama_server.exe` binary (borrowed from the `llama-cpp-gateway` project), removing almost all onboarding friction by providing a zero-config, out-of-the-box local vector model.
 - **Zero Cost & Zero Latency:** Pointing to local inference allows infinite document updates without API billing, completing local-to-local HTTP requests in milliseconds.
 - **Privacy:** Enterprise/proprietary code never leaves the host machine for generating vector hashes.
 
@@ -53,5 +53,5 @@ Real-time indexing dictates that embeddings must be free and incredibly fast. Hi
 ## 6. Implementation Roadmap
 1. **MCP Protocol Layer:** Implement standard `stdio` MCP transport alongside the existing WS routes, converting the current API map into standard MCP tool schemas.
 2. **Just-In-Time Indexing Flow:** Adjust search endpoints to return soft-fail responses with `index_codebase` recommendations when targeting an unindexed path.
-3. **Embeddings Gateway Refactor:** Configure `llm-client.js` to route via standardized OpenAI API contracts, specifically targeting local inferencing (Ollama, LM Studio) or the bundled `llama-cpp-gateway`.
+3. **Embeddings Gateway Refactor:** Configure `llm-client.js` to route via standardized OpenAI API contracts, specifically targeting local inferencing (Ollama, LM Studio) or the natively spawned `llama_server.exe`.
 4. **Watch Listeners:** Attach file watchers to the loaded codebase directories and hook them directly into the current `indexer.service.js` single-file update methods.
