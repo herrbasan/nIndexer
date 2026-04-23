@@ -1,6 +1,6 @@
 {
   "name": "nindexer",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Code Indexing Microservice - vector-based semantic search, keyword indexing, and file analysis",
   "type": "module",
   "main": "src/server.js",
