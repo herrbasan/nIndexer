@@ -7,8 +7,8 @@ nIndexer is a **semantic code search engine** that provides intelligent codebase
 ### Core Features
 
 - **Semantic Search** — Vector-based similarity search using embeddings (768-dim)
-- **Keyword Search** — Path + content search with ripgrep integration
-- **Hybrid Search** — Combines semantic + keyword for best results
+- **Keyword Search** — Path + content search with ripgrep integration using TF-IDF term density heuristics
+- **Hybrid Search** — Combines semantic + keyword with absolute semantic protection floor (>= 0.70) and boilerplate noise penalization
 - **Codebase Analysis** — Heuristic-based project understanding and file prioritization
 - **Multi-codebase Support** — Index and search across multiple projects simultaneously
 
@@ -395,7 +395,7 @@ Stop-Process -Id <PID> -Force
 ## Performance Notes
 
 - **Indexing speed:** ~100-200 files/second (depends on embedding model)
-- **Search latency:** <50ms for semantic, <100ms for hybrid
+- **Search latency:** <150ms for semantic/hybrid via `search_all`, ~9-20ms locally. Increased semantic `top_k` query by $3\times$ to boost low-ranking conceptual code logic in hybrid strategies.
 - **Memory usage:** ~100MB per 10k files (vectors in memory)
 - **Disk usage:** ~500KB per file (vectors + metadata)
 

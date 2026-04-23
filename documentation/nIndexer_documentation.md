@@ -201,6 +201,7 @@ Remove a codebase from the index. Moved to `trashDir` by default (can be recover
 
 #### `search` (hybrid)
 Combined semantic + keyword search. **Recommended for most queries.**
+It utilizes a TF-IDF term density heuristic on the keyword side, combined with an absolute semantic performance floor ($\ge 0.70$), and intelligently penalizes ranking multipliers for boilerplate (`README.md`, `package.json`, `.license`, etc.).
 
 ```json
 {
