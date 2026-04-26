@@ -9,8 +9,6 @@
     "dev": "node --watch src/server.js",
     "start:maintenance": "node src/maintenance-cli.js"
   },
-  "dependencies": {},
-  "devDependencies": {},
   "engines": {
     "node": ">=18.0.0"
   }

@@ -339,6 +339,14 @@ export class CodebaseIndexingService {
 
     this.indexes.set(name, { db, collection, metadata, source });
 
+    if (this.maintenance) {
+      try {
+        this.maintenance.watchCodebase(name, source);
+      } catch (err) {
+        logger.warn(`Failed to watch codebase`, { name, source, error: err.message }, 'Indexing');
+      }
+    }
+
     this.analyzeCodebase({ name }).catch(err => {
       logger.warn(`Auto-analysis skipped`, { name, reason: err.message }, 'Indexing');
     });

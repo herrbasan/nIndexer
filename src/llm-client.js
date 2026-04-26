@@ -1,30 +1,44 @@
-import { randomUUID } from 'crypto';
 import { config } from './config.js';
 import { getLogger } from './utils/logger.js';
+import { startLlamaServer, stopLlamaServer } from './utils/llama-spawner.js';
 
 const logger = getLogger();
 
-// Use Node.js built-in WebSocket (Node.js 21+)
-const WebSocket = globalThis.WebSocket || globalThis.ws;
-
 export class LLMClient {
   constructor() {
-    this.wsUrl = config.llm.gatewayWsUrl;
-    this.httpUrl = config.llm.gatewayHttpUrl;
-
-    this._ws = null;
-    this._pendingRequests = new Map();
-    this._isClosed = false;
-    this._reconnectAttempts = 0;
-    this._connect();
+    this._initialized = false;
+    
+    // Concurrency limiter for embeddings
+    const limit = config.llm.maxConcurrentRequests || 100;
+    this._maxConcurrency = limit;
+    this._activeRequests = 0;
+    this._queue = [];
 
     this._embedCircuitOpen = false;
     this._embedFailCount = 0;
     this._embedCircuitResetAt = 0;
+
+    this._initPromise = this._connect();
   }
 
-  get connected() {
-    return this._ws && this._ws.readyState === WebSocket.OPEN;
+  async _connect() {
+    if (config.llm.provider === 'local') {
+      const started = await startLlamaServer();
+      if (!started) {
+        logger.warn('Failed or skipped booting local Llama. Embeddings may fail if no fallback is available.', {}, 'LLMClient');
+      }
+      this.httpUrl = `http://localhost:${config.llama.port}`;
+    } else if (config.llm.provider === 'remote' && config.llm.remoteFallback) {
+      this.httpUrl = config.llm.remoteFallback;
+    } else {
+      this.httpUrl = `http://localhost:${config.llama.port}`; // Assume something is running externally on this port
+    }
+    
+    this._initialized = true;
+  }
+
+  async waitReady() {
+    if (!this._initialized) await this._initPromise;
   }
 
   get embedAvailable() {
@@ -50,153 +64,86 @@ export class LLMClient {
     }
   }
 
-  _connect() {
-    if (this._isClosed) return;
+  // Generic HTTP Fetcher for OpenAI schema
+  async _fetchEmbeddings(inputData) {
+    if (!this.embedAvailable) throw new Error('Embedding service unavailable (circuit breaker open)');
+    await this.waitReady();
 
-    this._ws = new WebSocket(this.wsUrl);
-
-    this._ws.onopen = () => {
-      logger.info(`Connected to LLM Gateway`, { url: this.wsUrl }, 'LLMClient');
-      this._reconnectAttempts = 0;
-    };
-
-    this._ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
-
-      if (msg.method === 'chat.delta') {
-        const req = this._pendingRequests.get(msg.params.request_id);
-        if (req) {
-          req.response.content += msg.params.choices?.[0]?.delta?.content || '';
-        }
-      } else if (msg.method === 'chat.done') {
-        const req = this._pendingRequests.get(msg.params.request_id);
-        if (req) {
-          req.resolve(req.response);
-          this._pendingRequests.delete(msg.params.request_id);
-        }
-      } else if (msg.method === 'chat.error') {
-        const req = this._pendingRequests.get(msg.params.request_id);
-        if (req) {
-          req.reject(new Error(msg.params.error?.message || String(msg.params.error)));
-          this._pendingRequests.delete(msg.params.request_id);
-        }
+    try {
+      const res = await fetch(`${this.httpUrl}/v1/embeddings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+           input: inputData, 
+           model: 'local-model' // Most local LLMs ignore this or use loaded model
+        })
+      });
+      
+      if (!res.ok) {
+        this._tripEmbedCircuit();
+        throw new Error(`HTTP ${res.status}: ${await res.text()}`);
       }
-    };
-
-    this._ws.onclose = () => {
-      if (this._isClosed) return;
-      logger.warn(`WebSocket disconnected`, { url: this.wsUrl }, 'LLMClient');
-      for (const req of this._pendingRequests.values()) {
-        req.reject(new Error('WebSocket disconnected'));
+      
+      const data = await res.json();
+      this._embedFailCount = 0;
+      return data;
+    } catch (err) {
+      if (err.message !== 'Embedding service unavailable (circuit breaker open)') {
+        logger.error('Failed to fetch embeddings', err, {}, 'LLMClient');
+        this._tripEmbedCircuit();
       }
-      this._pendingRequests.clear();
-      const delay = Math.min(1000 * Math.pow(2, this._reconnectAttempts), 30000);
-      this._reconnectAttempts++;
-      setTimeout(() => this._connect(), delay);
-    };
-
-    this._ws.onerror = (err) => {
-      logger.error(`WebSocket error`, err, { url: this.wsUrl }, 'LLMClient');
-    };
+      throw err;
+    }
   }
 
-  _send(msg) {
-    if (!this._ws || this._ws.readyState !== WebSocket.OPEN) {
-      throw new Error('Gateway WebSocket not connected');
+  // Concurrency Queue Executor
+  async _enqueue(taskFn) {
+    if (this._activeRequests >= this._maxConcurrency) {
+      await new Promise(resolve => this._queue.push(resolve));
     }
-    this._ws.send(JSON.stringify(msg));
+    
+    this._activeRequests++;
+    try {
+      return await taskFn();
+    } finally {
+      this._activeRequests--;
+      if (this._queue.length > 0) {
+         const next = this._queue.shift();
+         next(); // Unblock the next queued task
+      }
+    }
   }
 
   async embedText(text) {
-    if (!this.embedAvailable) throw new Error('Embedding service unavailable (circuit breaker open)');
-    try {
-      const res = await fetch(`${this.httpUrl}/v1/embeddings`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input: text, task: 'embed' })
-      });
-      if (!res.ok) {
-        this._tripEmbedCircuit();
-        throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-      }
-      const data = await res.json();
-      this._embedFailCount = 0;
-      return data.data[0].embedding;
-    } catch (err) {
-      if (err.message !== 'Embedding service unavailable (circuit breaker open)') {
-        this._tripEmbedCircuit();
-      }
-      throw err;
-    }
+     return this._enqueue(async () => {
+        const data = await this._fetchEmbeddings(text);
+        if (!data?.data?.[0]?.embedding) throw new Error('Invalid embedding response format');
+        return data.data[0].embedding;
+     });
   }
 
   async embedBatch(texts) {
-    if (!this.embedAvailable) throw new Error('Embedding service unavailable (circuit breaker open)');
-    try {
-      const res = await fetch(`${this.httpUrl}/v1/embeddings`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input: texts, task: 'embed' })
-      });
-      if (!res.ok) {
-        this._tripEmbedCircuit();
-        throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-      }
-      const data = await res.json();
-      this._embedFailCount = 0;
-      return data.data.map(d => d.embedding);
-    } catch (err) {
-      if (err.message !== 'Embedding service unavailable (circuit breaker open)') {
-        this._tripEmbedCircuit();
-      }
-      throw err;
-    }
+    return this._enqueue(async () => {
+        const data = await this._fetchEmbeddings(texts);
+        if (!data?.data || data.data.length !== texts.length) {
+            throw new Error('Invalid batch embedding response length');
+        }
+        return data.data.map(d => d.embedding);
+    });
   }
 
   async predict({ prompt, systemPrompt, taskType, temperature, maxTokens, responseFormat }) {
-    const task = taskType || 'query';
-    const response = await this.chat({
-      task,
-      messages: [{ role: 'user', content: prompt }],
-      systemPrompt,
-      maxTokens,
-      temperature,
-      responseFormat
-    });
-    return response.content;
+     throw new Error("Chat APIs via Gateway have been decoupled. This feature requires standard OpenAI REST implementation.");
   }
 
   async chat({ task, messages, systemPrompt, maxTokens, temperature, responseFormat }) {
-    const id = randomUUID();
-    const fullMessages = systemPrompt
-      ? [{ role: 'system', content: systemPrompt }, ...messages]
-      : messages;
-
-    return new Promise((resolve, reject) => {
-      this._pendingRequests.set(id, { resolve, reject, response: { content: '' } });
-
-      this._send({
-        jsonrpc: '2.0',
-        id,
-        method: 'chat.create',
-        params: {
-          task,
-          messages: fullMessages,
-          max_tokens: maxTokens,
-          temperature,
-          response_format: responseFormat,
-          stream: true
-        }
-      });
-    });
+     throw new Error("Chat APIs via Gateway have been decoupled. This feature requires standard OpenAI REST implementation.");
   }
 
   close() {
-    this._isClosed = true;
-    if (this._ws) this._ws.close();
-    for (const req of this._pendingRequests.values()) {
-      req.reject(new Error('LLM client closed'));
+    this._queue = []; // Clear pending requests
+    if (config.llm.provider === 'local') {
+      stopLlamaServer();
     }
-    this._pendingRequests.clear();
   }
 }

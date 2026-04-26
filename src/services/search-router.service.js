@@ -28,7 +28,9 @@ export class SearchRouter {
     if (keywordResults.length > 0) {
       const maxRank = Math.max(...keywordResults.map(r => Math.abs(r.rank)));
       for (const r of keywordResults) {
-        const normalized = maxRank > 0 ? 1 - (Math.abs(r.rank) / maxRank) : 0;
+          // r.rank is typically negative where larger absolute values indicate better matches (e.g., -9 is better than -2)
+          // For grep matches, matchScore is positive and we pushed -matchScore.
+          const normalized = maxRank > 0 ? (Math.abs(r.rank) / maxRank) : 1;
         const existing = scores.get(r.path);
         if (existing) {
           existing.keyword = Math.max(existing.keyword, normalized);
@@ -75,7 +77,7 @@ export class SearchRouter {
       combinedScore *= penalty;
 
       // Noise floor culling for cross-codebase scale
-      if (combinedScore >= 0.45) {
+      if (combinedScore >= 0.35) {
         combined.push({
           ...scores_data.data,
           score: combinedScore,

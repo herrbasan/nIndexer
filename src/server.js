@@ -6,179 +6,41 @@
  */
 
 import http from 'http';
-import { createHash, randomUUID } from 'crypto';
+import { randomUUID } from 'crypto';
 import { config } from './config.js';
 import { LLMClient } from './llm-client.js';
 import { init as initIndexingService, shutdown as shutdownIndexingService } from './services/indexing.service.js';
 import { DiscoveryService } from './services/discovery.service.js';
-import { createRouter } from './api/router.js';
+import { handleMcpMessage } from './api/mcp-router.js';
 import { getLogger } from './utils/logger.js';
 
 const HOST = config.service.host;
 const PORT = config.service.port;
 
-// Initialize logger
 const logger = getLogger();
 
 let server;
-let router;
 let llmClient;
 let indexingService;
 let discoveryService;
 
-// WebSocket opcodes
-const WS_OPCODE_TEXT = 0x01;
-const WS_OPCODE_TEXT_FRAME = 0x81; // FIN + text opcode for building frames
-const WS_OPCODE_CLOSE = 0x08;
-const WS_OPCODE_CLOSE_FRAME = 0x88; // FIN + close opcode for building frames
+// Per-session SSE state: Map<sessionId, { res, send }>
+const sessions = new Map();
 
-/**
- * Parse WebSocket frame (minimal parser for text frames)
- */
-function parseWSFrame(data) {
-  const firstByte = data[0];
-  const opcode = firstByte & 0x0f;
-  const secondByte = data[1];
-  const isMasked = (secondByte & 0x80) !== 0;
-  let offset = 2;
-  let payloadLength = secondByte & 0x7f;
-
-  if (payloadLength === 126) {
-    payloadLength = data.readUInt16BE(2);
-    offset = 4;
-  } else if (payloadLength === 127) {
-    payloadLength = Number(data.readBigUInt64BE(2));
-    offset = 10;
-  }
-
-  let maskingKey = null;
-  if (isMasked) {
-    maskingKey = data.slice(offset, offset + 4);
-    offset += 4;
-  }
-
-  let payload = data.slice(offset, offset + Number(payloadLength));
-
-  if (isMasked && maskingKey) {
-    payload = Buffer.from(payload.map((byte, i) => byte ^ maskingKey[i % 4]));
-  }
-
-  return { opcode, payload: payload.toString('utf8') };
-}
-
-/**
- * Build WebSocket frame for text message
- */
-function buildWSFrame(message) {
-  const payload = Buffer.from(message, 'utf8');
-  const payloadLength = payload.length;
-
-  let frame;
-  if (payloadLength <= 125) {
-    frame = Buffer.alloc(2 + payloadLength);
-    frame[1] = payloadLength;
-  } else if (payloadLength <= 65535) {
-    frame = Buffer.alloc(4 + payloadLength);
-    frame[1] = 126;
-    frame.writeUInt16BE(payloadLength, 2);
-  } else {
-    frame = Buffer.alloc(10 + payloadLength);
-    frame[1] = 127;
-    frame.writeBigUInt64BE(BigInt(payloadLength), 2);
-  }
-
-  frame[0] = WS_OPCODE_TEXT_FRAME;
-  payload.copy(frame, frame.length - payloadLength);
-
-  return frame;
-}
-
-/**
- * Build WebSocket close frame
- */
-function buildWSCloseFrame() {
-  const frame = Buffer.alloc(2);
-  frame[0] = WS_OPCODE_CLOSE_FRAME;
-  frame[1] = 0;
-  return frame;
-}
-
-/**
- * Compute WebSocket accept key from challenge
- */
-function computeAcceptKey(key) {
-  const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
-  return createHash('sha1').update(key + GUID).digest('base64');
-}
-
-/**
- * Create a WebSocket wrapper around a net socket
- */
-function createWsSocket(socket, router) {
-  const clientId = randomUUID();
-  let isClosed = false;
-
-  const ws = {
-    readyState: 0, // CONNECTING
-
-    send(data) {
-      if (isClosed) return;
-      const str = typeof data === 'string' ? data : JSON.stringify(data);
-      const frame = buildWSFrame(str);
-      socket.write(frame);
-    },
-
-    close() {
-      if (isClosed) return;
-      isClosed = true;
-      socket.write(buildWSCloseFrame());
-      socket.end();
-    },
-
-    on(event, handler) {
-      if (event === 'message') {
-        socket.on('data', (chunk) => {
-          try {
-            const { opcode, payload } = parseWSFrame(chunk);
-            if (opcode === WS_OPCODE_TEXT) {
-              const message = JSON.parse(payload);
-              handler(message);
-            } else if (opcode === WS_OPCODE_CLOSE) {
-              // Client initiated close - respond with close frame and close socket
-              isClosed = true;
-              socket.write(buildWSCloseFrame());
-              socket.end();
-              handler({ type: 'close' });
-            }
-          } catch (err) {
-            // Ignore parse errors
-          }
-        });
-      } else if (event === 'close') {
-        socket.on('close', handler);
-      } else if (event === 'error') {
-        socket.on('error', handler);
-      }
-    }
-  };
-
-  // Connection established
-  ws.readyState = 1; // OPEN
-
-  return ws;
+function sseWrite(res, event, data) {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
 async function main() {
-  // Initialize LLM client
   llmClient = new LLMClient();
 
-  // Initialize the indexing service
   const serviceConfig = {
     ...config.indexing,
     trashDir: config.storage.trashDir,
     spaces: config.spaces,
     maintenance: config.maintenance
   };
+  
   indexingService = await initIndexingService({
     config: { codebase: serviceConfig },
     gateway: llmClient
@@ -190,121 +52,119 @@ async function main() {
     discoveryService.start();
   }
 
-  // Create WebSocket router
-  router = createRouter(indexingService);
-
-  // Create HTTP server with WebSocket upgrade handling
   server = http.createServer((req, res) => {
+    // CORS Headers
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(200);
+      return res.end();
+    }
+
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        status: 'ok',
-        service: 'nIndexer',
-        version: '1.0.0',
-        timestamp: new Date().toISOString()
-      }));
+      return res.end(JSON.stringify({ status: 'ok', service: 'nIndexer-MCP' }));
+    }
+
+    // MCP Server-Sent Events Initialization
+    if (req.method === 'GET' && req.url === '/mcp/sse') {
+      const sessionId = randomUUID();
+      logger.info(`New MCP SSE session connected`, { sessionId }, 'MCP');
+
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+      });
+
+      res.write(`event: endpoint\ndata: /mcp/message?sessionId=${sessionId}\n\n`);
+
+      const send = (msg) => {
+        try {
+          sseWrite(res, 'message', msg);
+        } catch (err) {
+          logger.error('Failed to send SSE message', err, { sessionId }, 'MCP');
+        }
+      };
+      sessions.set(sessionId, { res, send });
+
+      req.on('close', () => {
+        logger.info(`MCP Session disconnected`, { sessionId }, 'MCP');
+        sessions.delete(sessionId);
+      });
       return;
     }
 
-    // All other routes return 404 for HTTP (WebSocket is primary)
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Not found. Use WebSocket on this endpoint.' }));
-  });
-
-  // Handle WebSocket upgrade
-  server.on('upgrade', (req, socket, head) => {
-    // Verify it's a WebSocket upgrade request
-    const upgrade = req.headers.upgrade?.toLowerCase();
-    if (upgrade !== 'websocket') {
-      socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-
-    const key = req.headers['sec-websocket-key'];
-    if (!key) {
-      socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-
-    const acceptKey = computeAcceptKey(key);
-
-    // Send upgrade response
-    const response = [
-      'HTTP/1.1 101 Switching Protocols',
-      'Upgrade: websocket',
-      'Connection: Upgrade',
-      `Sec-WebSocket-Accept: ${acceptKey}`,
-      '',
-      ''
-    ].join('\r\n');
-
-    socket.write(response);
-
-    // Create WebSocket wrapper
-    const ws = createWsSocket(socket, router);
-    const clientId = router.addClient(ws);
-    logger.info(`Client connected: ${clientId} from ${socket.remoteAddress}`, { clientId, remoteAddress: socket.remoteAddress }, 'WebSocket');
-
-    ws.on('message', (message) => {
-      try {
-        router.handleMessage(clientId, message);
-      } catch (err) {
-        ws.send(JSON.stringify({
-          jsonrpc: '2.0',
-          error: { code: -32700, message: 'Parse error: Invalid JSON' }
-        }));
+    // MCP JSON-RPC Message Receiver
+    if (req.method === 'POST' && req.url.startsWith('/mcp/message')) {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      const sessionId = url.searchParams.get('sessionId');
+      
+      const session = sessions.get(sessionId);
+      if (!session) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        return res.end('Session not found');
       }
-    });
 
-    ws.on('close', () => {
-      router.removeClient(clientId);
-      logger.info(`Client disconnected: ${clientId}`, { clientId }, 'WebSocket');
-    });
+      let body = '';
+      req.on('data', chunk => { body += chunk.toString(); });
+      
+      req.on('end', () => {
+        try {
+          const message = JSON.parse(body);
+          
+          // Ack immediately for typical POST handling, SSE responds.
+          res.writeHead(202, { 'Content-Type': 'text/plain' });
+          res.end('Accepted');
 
-    ws.on('error', (err) => {
-      logger.error(`WebSocket error for ${clientId}`, err, { clientId }, 'WebSocket');
-    });
+          handleMcpMessage(message, session, indexingService);
+        } catch (err) {
+          logger.error('Failed to parse incoming MCP message', err, {}, 'MCP');
+          res.writeHead(400, { 'Content-Type': 'text/plain' });
+          res.end('Invalid JSON');
+        }
+      });
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not found. Use /mcp/sse for MCP protocol.' }));
   });
 
-  // Start listening
   server.listen(PORT, HOST, () => {
     const sessionInfo = logger.getSessionInfo();
-    logger.info(`nIndexer service starting`, {
-      host: HOST,
-      port: PORT,
-      sessionId: sessionInfo.sessionId,
-      logFile: sessionInfo.logFile
-    }, 'Server');
-    logger.info(`WebSocket endpoint: ws://${HOST}:${PORT}`, {}, 'Server');
-    logger.info(`Health check: http://${HOST}:${PORT}/health`, {}, 'Server');
+    logger.info(`nIndexer MCP service starting`, { host: HOST, port: PORT }, 'Server');
+    logger.info(`SSE endpoint: http://localhost:${PORT}/mcp/sse`, {}, 'Server');
   });
 
-  // Graceful shutdown
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
-}
+  // Keepalive ping for SSE proxies
+  const keepalive = setInterval(() => {
+    for (const [, session] of sessions) {
+      try {
+        session.res.write(':\n\n');
+      } catch (err) {
+        logger.error('Failed to send keepalive', err, {}, 'Server');
+      }
+    }
+  }, 15000);
 
-async function shutdown() {
-  logger.warn('Server shutting down', {}, 'Server');
+  async function gracefulShutdown() {
+    logger.warn('Server shutting down', {}, 'Server');
+    clearInterval(keepalive);
+    server.close();
+    for (const [, session] of sessions) session.res.end();
+    sessions.clear();
+    discoveryService?.stop();
+    await shutdownIndexingService?.();
+    llmClient?.close();
+    logger.close('Server shutdown complete');
+    process.exit(0);
+  }
 
-  // Close all client connections
-  router?.closeAll();
-
-  // Stop discovery
-  discoveryService?.stop();
-
-  // Shutdown indexing service
-  await shutdownIndexingService?.();
-
-  // Close LLM client
-  llmClient?.close();
-
-  // Close logger gracefully
-  logger.close('Server shutdown complete');
-  
-  process.exit(0);
+  process.on('SIGINT', gracefulShutdown);
+  process.on('SIGTERM', gracefulShutdown);
 }
 
 main().catch((err) => {

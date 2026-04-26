@@ -244,71 +244,64 @@ export class Indexer {
     let embedBatchCount = 0;
     let embedTotalServerTime = 0;
     
-    for (let i = 0; i < embeddableFiles.length; i += EMBED_BATCH_SIZE) {
-      if (this.cancelled) throw new Error('Indexing cancelled');
-      
-      if (!this.router.embedAvailable) {
-        logger.warn(`Embedding service unavailable, stopping index at ${embeddings.length}/${embeddableFiles.length} files`, {
-          embedded: embeddings.length,
-          total: embeddableFiles.length
-        }, 'Indexer');
-        break;
-      }
+    const embedTasks = [];
+      for (let i = 0; i < embeddableFiles.length; i += EMBED_BATCH_SIZE) {
+        const batch = embeddableFiles.slice(i, i + EMBED_BATCH_SIZE);
+        const texts = batch.map(p => p.embeddingText);
 
-      const batch = embeddableFiles.slice(i, i + EMBED_BATCH_SIZE);
-      const texts = batch.map(p => p.embeddingText);
-      
-      try {
-        const bt0 = Date.now();
-        const vectors = await this.router.embedBatch(texts);
-        const bt1 = Date.now();
-        embedBatchCount++;
-        embedTotalServerTime += (bt1 - bt0);
-        
-        for (let j = 0; j < batch.length; j++) {
-          embeddings.push({
-            ...batch[j],
-            vector: vectors[j]
-          });
-        }
-      } catch (err) {
-        if (!this.router.embedAvailable) {
-          logger.warn(`Embedding service became unavailable during batch, stopping`, {
-            embedded: embeddings.length,
-            total: embeddableFiles.length
-          }, 'Indexer');
-          break;
-        }
-
-        for (const item of batch) {
-          if (!this.router.embedAvailable) break;
+        embedTasks.push((async () => {
+          if (this.cancelled) return;
+          if (!this.router.embedAvailable) return;
+          
           try {
             const bt0 = Date.now();
-            const vector = await this.router.embedText(item.embeddingText);
-            embedTotalServerTime += (Date.now() - bt0);
-            embeddings.push({ ...item, vector });
-          } catch (e) {
-            errors.push({ file: item.relativePath, error: e.message });
-            embedFailedFiles.push(item.relativePath);
-            logger.debug(`Skipping file due to embedding error`, { path: item.relativePath, error: e.message }, 'Indexer');
+            const vectors = await this.router.embedBatch(texts);
+            const bt1 = Date.now();
+            embedBatchCount++;
+            embedTotalServerTime += (bt1 - bt0);
+            
+            for (let j = 0; j < batch.length; j++) {
+              embeddings.push({
+                ...batch[j],
+                vector: vectors[j]
+              });
+            }
+          } catch (err) {
+            if (!this.router.embedAvailable) return;
+            
+            for (const item of batch) {
+              if (this.cancelled || !this.router.embedAvailable) break;
+              try {
+                const bt0 = Date.now();
+                const vector = await this.router.embedText(item.embeddingText);
+                embedTotalServerTime += (Date.now() - bt0);
+                embeddings.push({ ...item, vector });
+              } catch (e) {
+                errors.push({ file: item.relativePath, error: e.message });
+                embedFailedFiles.push(item.relativePath);
+              }
+            }
           }
-        }
+          
+          const now = Date.now();
+          if (now - lastProgressTime > 500) {
+            const currentLength = embeddings.length;
+            const rate = currentLength / ((now - startTime) / 1000);
+            onProgress?.({
+              phase: "embedding",
+              total: totalFiles,
+              current: currentLength,
+              message: `Embedded ${currentLength}/${embeddableFiles.length} files (${rate.toFixed(1)}/s)`,
+              rate
+            });
+            lastProgressTime = now;
+          }
+        })());
       }
       
-      const now = Date.now();
-      if (now - lastProgressTime > 500) {
-        const rate = embeddings.length / ((now - startTime) / 1000);
-        onProgress?.({
-          phase: 'embedding',
-          total: totalFiles,
-          current: Math.min(i + EMBED_BATCH_SIZE, embeddableFiles.length),
-          message: `Embedded ${Math.min(i + EMBED_BATCH_SIZE, embeddableFiles.length)}/${embeddableFiles.length} files (${rate.toFixed(1)}/s)`,
-          rate
-        });
-        lastProgressTime = now;
-      }
-    }
-    const phase2Duration = Date.now() - phase2Start;
+      await Promise.all(embedTasks);
+      if (this.cancelled) throw new Error("Indexing cancelled");
+      const phase2Duration = Date.now() - phase2Start;
     const embedFailures = embeddableFiles.length - embeddings.length;
     logger.info(`Phase 2 - Embedding`, { 
       count: embeddings.length, 
@@ -963,3 +956,4 @@ export class Indexer {
 }
 
 // Parsers imported from ./parser/index.js (tree-sitter with regex fallback)
+

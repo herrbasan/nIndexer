@@ -9,6 +9,7 @@
  */
 
 import fs from 'fs/promises';
+import { watch } from 'fs';
 import path from 'path';
 import { getLogger } from '../utils/logger.js';
 
@@ -23,6 +24,7 @@ export class CodebaseMaintenance {
       intervalMs: 900000,
       autoRefresh: true,
       staleThresholdMs: 300000,
+      watchEnabled: true, // Native JIT
       ...config
     };
     this.intervalId = null;
@@ -31,8 +33,11 @@ export class CodebaseMaintenance {
     this.stats = {
       totalRefreshes: 0,
       filesUpdated: 0,
-      errors: 0
+      errors: 0,
+      totalCycles: 0
     };
+    this.watchers = new Map(); // codebaseName -> FSWatcher
+    this.debounceTimers = new Map(); // codebaseName -> timeout
   }
 
   setDiscoveryService(discoveryService) {
@@ -40,9 +45,9 @@ export class CodebaseMaintenance {
   }
 
   /**
-   * Start automatic maintenance cycle
+   * Start automatic maintenance cycle and file watchers
    */
-  start() {
+  async start() {
     if (!this.config.enabled || this.intervalId) return;
     
     this.intervalId = setInterval(
@@ -51,16 +56,80 @@ export class CodebaseMaintenance {
     );
     
     logger.info(`Maintenance started`, { intervalMin: this.config.intervalMs / 60000 }, 'Maintenance');
+
+    // Start all watchers on known codebases
+    if (this.config.watchEnabled) {
+      try {
+        const codebases = await this.service.listCodebases();
+        for (const cb of codebases) {
+          const metadata = await this.service._loadCodebaseMetadata(cb.name);
+          if (metadata?.source) {
+            this.watchCodebase(cb.name, metadata.source);
+          }
+        }
+      } catch (err) {
+        logger.error('Failed to initialize watchers', err, {}, 'Maintenance');
+      }
+    }
   }
 
   /**
-   * Stop maintenance cycle
+   * Stop maintenance cycle and file watchers
    */
   stop() {
     if (this.intervalId) {
       clearInterval(this.intervalId);
       this.intervalId = null;
-      logger.info(`Maintenance stopped`, {}, 'Maintenance');
+    }
+    for (const [name, watcher] of this.watchers) {
+      watcher.close();
+    }
+    this.watchers.clear();
+    for (const [name, timer] of this.debounceTimers) {
+      clearTimeout(timer);
+    }
+    this.debounceTimers.clear();
+    logger.info(`Maintenance stopped`, {}, 'Maintenance');
+  }
+
+  /**
+   * Add a real-time fs.watch listener to a codebase
+   */
+  watchCodebase(codebaseName, sourcePath) {
+    if (!this.config.watchEnabled || this.watchers.has(codebaseName)) return;
+
+    logger.info(`Starting JIT file watcher`, { codebaseName, sourcePath }, 'Maintenance');
+    try {
+      const watcher = watch(sourcePath, { recursive: true }, (eventType, filename) => {
+        if (!filename || this._shouldIgnore(filename.replace(/\\/g, '/'), false)) return;
+        
+        // Debounce by 5 seconds
+        if (this.debounceTimers.has(codebaseName)) {
+           clearTimeout(this.debounceTimers.get(codebaseName));
+        }
+
+        const timer = setTimeout(async () => {
+           this.debounceTimers.delete(codebaseName);
+           logger.debug(`JIT Watcher triggering refresh for ${codebaseName}`, { filename, eventType }, 'Maintenance');
+           try {
+             await this.checkAndRefresh(codebaseName);
+           } catch(err) {
+             logger.error(`JIT Watcher refresh failed`, err, { codebaseName }, 'Maintenance');
+           }
+        }, 5000);
+
+        this.debounceTimers.set(codebaseName, timer);
+      });
+
+      // Handle errors like unlinking the directory itself
+      watcher.on('error', (err) => {
+        logger.error(`Watcher error on ${codebaseName}`, err, {}, 'Maintenance');
+        this.watchers.delete(codebaseName);
+      });
+
+      this.watchers.set(codebaseName, watcher);
+    } catch (err) {
+      logger.error(`Failed to start watcher`, err, { codebaseName, sourcePath }, 'Maintenance');
     }
   }
 

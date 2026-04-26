@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "nIndexer": {
+      "command": "node",
+      "args": [
+        "D:\\DEV\\nIndexer_V2\\src\\mcp-stdio.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      }
+    }
+  }
+}

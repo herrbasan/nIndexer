@@ -29,10 +29,18 @@ for (const pathStr of required) {
   }
 }
 
-// Set default LLM URLs if not configured
+if (!config.llama) {
+  config.llama = {
+    port: 42718,
+    modelPath: 'bin/llama/models/jina-embeddings-v2-base-code-Q5_K_M.gguf',
+    ctxSize: 8192,
+    concurrencyLimit: 50
+  };
+}
+
 if (!config.llm) config.llm = {};
-if (!config.llm.gatewayWsUrl) config.llm.gatewayWsUrl = 'ws://localhost:3400/v1/realtime';
-if (!config.llm.gatewayHttpUrl) config.llm.gatewayHttpUrl = 'http://localhost:3400';
+if (!config.llm.provider) config.llm.provider = 'local';
+if (!config.llm.maxConcurrentRequests) config.llm.maxConcurrentRequests = 100;
 
 const projectRoot = path.join(__dirname, '..');
 

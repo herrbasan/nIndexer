@@ -18,7 +18,7 @@ export function getLogger() {
         get(target, prop) {
             if (['info', 'warn', 'error', 'debug'].includes(prop)) {
                 return (msg, meta, type, opts = {}) => {
-                    const method = prop === 'error' ? console.error : console.log;
+                    const method = prop === 'error' ? console.error : (process.env.MCP_STDIO ? console.error : console.log);
                     method(`[${String(type || 'System').padEnd(10)}] [${prop.toUpperCase().padEnd(5)}] ${msg}`, meta ? Object.keys(meta).length ? meta : '' : '');
                     return target[prop](msg, meta, type, opts);
                 };
