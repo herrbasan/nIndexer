@@ -9,12 +9,15 @@ A WebSocket-first microservice for vector-based semantic search, keyword indexin
 ## Quick Start
 
 ```bash
-# Start the server (from any directory)
+# Start the WebSocket/HTTP server
 node src/server.js
 
 # Server runs at:
 # - HTTP: http://localhost:3666 (health check only)
 # - WebSocket: ws://localhost:3666
+
+# Or start the MCP stdio transport (for IDEs like Cursor/Claude Desktop)
+node src/mcp-stdio.js
 ```
 
 ---
@@ -23,16 +26,16 @@ node src/server.js
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     Client (MCP Orchestrator)               │
+│             MCP Client (Cursor / Claude Desktop / UI)       │
 └─────────────────────────────┬───────────────────────────────┘
-                              │ WebSocket / JSON-RPC
-                              ▼
+  WebSocket / JSON-RPC        │        Stdio (stdin/stdout)
+  ▼                           ▼                           ▼
 ┌─────────────────────────────────────────────────────────────┐
-│               nIndexer WebSocket Server                     │
-│                     (src/server.js)                         │
+│               nIndexer (MCP Server Endpoint)                │
 │                                                             │
 │  HTTP Server ───► Health Check (/health)                   │
-│  WebSocket ──────► JSON-RPC Router (src/api/router.js)     │
+│  WebSocket ──────► MCP Router (src/api/router.js)          │
+│  Stdio Service ──► MCP Proxy  (src/mcp-stdio.js)           │
 └─────────────────────────────┬───────────────────────────────┘
                               │
                               ▼
@@ -44,7 +47,7 @@ node src/server.js
 │  Indexer ─────► nVDB (Rust vector DB)                      │
 │  Metadata ────► SimpleMetadataStore (JSON)                 │
 │  Grep ────────► ripgrep process                            │
-│  LLM ─────────► LLM Gateway (HTTP/WS)                      │
+│  LLM ─────────► Local Embedded LLaMA (Embeddings)          │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -69,8 +72,8 @@ nIndexer automatically discovers and indexes projects from configured root direc
 {
   "discovery": {
     "roots": [
-      "\\\\coolkid\\Work\\Work\\_GIT\\",
-      "\\\\BADKID\\Stuff\\DEV\\"
+      "C:\\Projects\\",
+      "\\\\SERVER\\Share\\Code\\"
     ],
     "scanIntervalMs": 3600000
   }
@@ -96,7 +99,21 @@ ws://localhost:3666
 
 JSON-RPC 2.0 over WebSocket.
 
-**Request:**
+---
+
+## Standard I/O (stdio) API
+
+For MCP environments like Cursor or Claude Desktop, you can run nIndexer via stdio:
+
+```bash
+node src/mcp-stdio.js
+```
+
+This bypasses the WebSocket server entirely, reading JSON-RPC messages line-by-line from `stdin` and outputting strictly-validated JSON to `stdout`. All internal logs are rerouted to `stderr` to prevent JSON-RPC corruption.
+
+---
+
+**Request (Both WS & Stdio):**
 ```json
 {
   "jsonrpc": "2.0",
@@ -565,11 +582,11 @@ Service configuration. All paths should be absolute.
     "cors": false
   },
   "storage": {
-    "dataDir": "D:\\DEV\\nIndexer\\data\\codebases",
-    "trashDir": "D:\\DEV\\nIndexer\\data\\trash"
+    "dataDir": "C:\\nIndexer\\data\\codebases",
+    "trashDir": "C:\\nIndexer\\data\\trash"
   },
   "logs": {
-    "dir": "D:\\DEV\\nIndexer\\logs",
+    "dir": "C:\\nIndexer\\logs",
     "retentionDays": 7
   },
   "indexing": {
@@ -594,14 +611,20 @@ Service configuration. All paths should be absolute.
   },
   "discovery": {
     "roots": [
-      "\\\\coolkid\\Work\\Work\\_GIT\\",
-      "\\\\BADKID\\Stuff\\DEV\\"
+      "C:\\Projects\\",
+      "\\\\SERVER\\Share\\Code\\"
     ],
     "scanIntervalMs": 3600000
   },
+  "llama": {
+    "port": 42718,
+    "modelPath": "bin/llama/models/jina-embeddings-v2-base-code-Q5_K_M.gguf",
+    "ctxSize": 8192,
+    "concurrencyLimit": 50
+  },
   "llm": {
-    "gatewayWsUrl": "ws://localhost:3400/v1/realtime",
-    "gatewayHttpUrl": "http://localhost:3400"
+    "provider": "local",
+    "maxConcurrentRequests": 100
   }
 }
 ```
@@ -627,19 +650,18 @@ Service configuration. All paths should be absolute.
 | `maintenance` | `autoRefresh` | boolean | Auto-refresh stale codebases (default: `true`) |
 | `discovery` | `roots` | string[] | Root directories to scan for projects |
 | `discovery` | `scanIntervalMs` | number | Discovery re-scan interval in ms (default: `3600000`) |
-| `llm` | `gatewayWsUrl` | string | LLM Gateway WebSocket URL |
-| `llm` | `gatewayHttpUrl` | string | LLM Gateway HTTP URL |
+| `llama` | `port` | number | Embedded local LLaMA HTTP port |
+| `llama` | `modelPath` | string | Path to GGUF model for local embeddings |
+| `llama` | `concurrencyLimit` | number | Semaphore size for concurrent llama-server requests |
+| `llm` | `provider` | string | `local` (built-in) or `remote` |
+| `llm` | `maxConcurrentRequests` | number | Global max concurrent LLM operations |
 
 ---
 
-## Embedding Circuit Breaker
+## Embedding Concurrency Limits
 
-The LLM client includes a circuit breaker that stops indexing when the embedding service is unavailable:
-
-- After 3 consecutive embedding failures, the circuit breaker trips for 60 seconds
-- Pending indexing batches are gracefully stopped (already-embedded files are still stored)
-- Discovery defers indexing new codebases until the circuit resets
-- The circuit auto-resets after the cooldown period
+The system uses `Promise.all` alongside a semaphore pattern (`llm.maxConcurrentRequests` / `llama.concurrencyLimit`) to process embeddings without crashing local hardware or remote services.
+- Internal limits prevent `llama-server` from crashing locally when fed hundreds of file chunks at once.
 
 ---
 
@@ -731,6 +753,7 @@ curl http://localhost:3666/health
 nIndexer/
 ├── src/
 │   ├── server.js                          # WebSocket/HTTP server
+│   ├── mcp-stdio.js                       # Stdio entrypoint for MCP clients
 │   ├── api/
 │   │   └── router.js                      # JSON-RPC message routing
 │   ├── services/
