@@ -2,19 +2,17 @@
 
 ## Overview
 
-A WebSocket-first microservice for vector-based semantic search, keyword indexing, and file analysis of codebases. Built with native Node.js (no external dependencies).
-
----
+An MCP-native microservice for vector-based semantic search, keyword indexing, and file analysis of codebases. Built with native Node.js (no external dependencies).
 
 ## Quick Start
 
 ```bash
-# Start the WebSocket/HTTP server
+# Start the HTTP/SSE server
 node src/server.js
 
 # Server runs at:
-# - HTTP: http://localhost:3666 (health check only)
-# - WebSocket: ws://localhost:3666
+# - HTTP: http://localhost:3666 (health check)
+# - SSE: http://localhost:3666/mcp/sse (MCP protocol endpoint)
 
 # Or start the MCP stdio transport (for IDEs like Cursor/Claude Desktop)
 node src/mcp-stdio.js
@@ -28,13 +26,13 @@ node src/mcp-stdio.js
 ┌─────────────────────────────────────────────────────────────┐
 │             MCP Client (Cursor / Claude Desktop / UI)       │
 └─────────────────────────────┬───────────────────────────────┘
-  WebSocket / JSON-RPC        │        Stdio (stdin/stdout)
+  HTTP/SSE (JSON-RPC)         │        Stdio (stdin/stdout)
   ▼                           ▼                           ▼
 ┌─────────────────────────────────────────────────────────────┐
 │               nIndexer (MCP Server Endpoint)                │
 │                                                             │
 │  HTTP Server ───► Health Check (/health)                   │
-│  WebSocket ──────► MCP Router (src/api/router.js)          │
+│  SSE Endpoint ───► MCP Router (src/api/mcp-router.js)      │
 │  Stdio Service ──► MCP Proxy  (src/mcp-stdio.js)           │
 └─────────────────────────────┬───────────────────────────────┘
                               │
@@ -87,48 +85,58 @@ nIndexer automatically discovers and indexes projects from configured root direc
 
 ---
 
-## WebSocket API
+## MCP Protocol
 
-### Connection
+nIndexer implements the Model Context Protocol (MCP) over two transports:
+
+### 1. HTTP/SSE Transport
+
+For remote MCP clients and web-based assistants:
 
 ```
-ws://localhost:3666
+GET http://localhost:3666/mcp/sse       # Establish SSE session
+POST http://localhost:3666/mcp/message  # Send JSON-RPC requests
 ```
 
-### Protocol
+The SSE endpoint returns an `endpoint` event with the session-specific message URL.
 
-JSON-RPC 2.0 over WebSocket.
+### 2. Standard I/O (stdio) Transport
 
----
-
-## Standard I/O (stdio) API
-
-For MCP environments like Cursor or Claude Desktop, you can run nIndexer via stdio:
+For local MCP environments like Cursor or Claude Desktop:
 
 ```bash
 node src/mcp-stdio.js
 ```
 
-This bypasses the WebSocket server entirely, reading JSON-RPC messages line-by-line from `stdin` and outputting strictly-validated JSON to `stdout`. All internal logs are rerouted to `stderr` to prevent JSON-RPC corruption.
+Reads JSON-RPC messages line-by-line from `stdin`, outputs responses to `stdout`. All internal logs are rerouted to `stderr` to prevent JSON-RPC corruption.
 
 ---
 
-**Request (Both WS & Stdio):**
+**Request (Both transports):**
 ```json
 {
   "jsonrpc": "2.0",
-  "id": "unique-id",
-  "method": "tool_name",
-  "params": { ... }
+  "id": "1",
+  "method": "tools/call",
+  "params": {
+    "name": "search_codebase",
+    "arguments": {
+      "codebase": "my_project",
+      "query": "websocket connection handling",
+      "limit": 5
+    }
+  }
 }
 ```
 
-**Response:**
+**Response (formatted as MCP tool result):**
 ```json
 {
   "jsonrpc": "2.0",
   "id": "unique-id",
-  "result": { ... }
+  "result": {
+    "content": [{ "type": "text", "text": "..." }]
+  }
 }
 ```
 
@@ -216,7 +224,7 @@ Remove a codebase from the index. Moved to `trashDir` by default (can be recover
 
 ### Search
 
-#### `search` (hybrid)
+#### `search_codebase` (hybrid)
 Combined semantic + keyword search. **Recommended for most queries.**
 It utilizes a TF-IDF term density heuristic on the keyword side, combined with an absolute semantic performance floor ($\ge 0.70$), and intelligently penalizes ranking multipliers for boilerplate (`README.md`, `package.json`, `.license`, etc.).
 
@@ -572,7 +580,7 @@ List all indexed codebases.
 
 ### `config.json`
 
-Service configuration. All paths should be absolute.
+Service configuration. Paths can be relative (resolved from project root) or absolute.
 
 ```json
 {
@@ -582,15 +590,15 @@ Service configuration. All paths should be absolute.
     "cors": false
   },
   "storage": {
-    "dataDir": "C:\\nIndexer\\data\\codebases",
-    "trashDir": "C:\\nIndexer\\data\\trash"
+    "dataDir": "./data/codebases",
+    "trashDir": "./data/trash"
   },
   "logs": {
-    "dir": "C:\\nIndexer\\logs",
+    "dir": "./logs",
     "retentionDays": 7
   },
   "indexing": {
-    "embeddingDimension": 3072,
+    "embeddingDimension": 768,
     "maxFileSize": 1048576,
     "ignorePatterns": [
       "**/node_modules/**",
@@ -636,11 +644,11 @@ Service configuration. All paths should be absolute.
 | `service` | `host` | string | Bind host (default: `localhost`) |
 | `service` | `port` | number | Bind port (default: `3666`) |
 | `service` | `cors` | boolean | Enable CORS (default: `false`) |
-| `storage` | `dataDir` | string | Absolute path for indexed codebase data |
-| `storage` | `trashDir` | string | Absolute path for removed codebases |
-| `logs` | `dir` | string | Absolute path for log files |
+| `storage` | `dataDir` | string | Path for indexed codebase data (relative or absolute) |
+| `storage` | `trashDir` | string | Path for removed codebases (relative or absolute) |
+| `logs` | `dir` | string | Path for log files (relative or absolute) |
 | `logs` | `retentionDays` | number | Days to keep session logs (default: `7`) |
-| `indexing` | `embeddingDimension` | number | Embedding vector dimension (default: `3072`) |
+| `indexing` | `embeddingDimension` | number | Embedding vector dimension (default: `768`) |
 | `indexing` | `maxFileSize` | number | Max file size in bytes (default: `1048576`) |
 | `indexing` | `ignorePatterns` | string[] | Glob patterns to exclude |
 | `indexing` | `batchSize` | number | Embedding batch size (default: `25`) |
@@ -709,9 +717,7 @@ curl http://localhost:3666/health
 ```json
 {
   "status": "ok",
-  "service": "nIndexer",
-  "version": "1.0.0",
-  "timestamp": "2026-03-27T17:00:00.000Z"
+  "service": "nIndexer-MCP"
 }
 ```
 
@@ -734,15 +740,14 @@ curl http://localhost:3666/health
 
 **None.** Uses only Node.js built-in modules:
 - `http` - HTTP server
-- `crypto` - WebSocket handshake
+- `crypto` - UUID generation
 - `fs` - File system access
 - `path` - Path manipulation
-- `WebSocket` - Native WebSocket (Node.js 21+)
 - `fetch` - Native fetch (Node.js 21+)
 
 ### External Services Required
 
-1. **LLM Gateway** (port 3400) - For embeddings and analysis
+1. **LLaMA Server** (port 42718) - Local embedding generation
 2. **nVDB** - Rust vector database (compiled binary included)
 
 ---
@@ -752,10 +757,11 @@ curl http://localhost:3666/health
 ```
 nIndexer/
 ├── src/
-│   ├── server.js                          # WebSocket/HTTP server
+│   ├── server.js                          # HTTP/SSE server
 │   ├── mcp-stdio.js                       # Stdio entrypoint for MCP clients
 │   ├── api/
-│   │   └── router.js                      # JSON-RPC message routing
+│   │   ├── mcp-router.js                  # JSON-RPC message routing
+│   │   └── mcp-tools.js                   # MCP tool definitions
 │   ├── services/
 │   │   ├── indexing.service.js            # Main service
 │   │   ├── indexer.service.js             # File walking, embedding
@@ -765,8 +771,11 @@ nIndexer/
 │   │   ├── grep.service.js                # ripgrep integration
 │   │   ├── metadata.service.js            # JSON metadata store
 │   │   └── project-analyzer.service.js    # Heuristic codebase analysis
-│   ├── llm-client.js                      # LLM Gateway client (with circuit breaker)
-│   └── config.js                          # Config loader
+│   ├── llm-client.js                      # LLaMA embedding client (with circuit breaker)
+│   ├── config.js                          # Config loader
+│   └── utils/
+│       ├── logger.js                      # nLogger wrapper
+│       └── llama-spawner.js               # Local LLaMA process management
 ├── nVDB/                                  # Rust vector DB (submodule)
 ├── nLogger/                               # Logging utility (submodule)
 ├── data/

@@ -10,7 +10,7 @@
 
 ## Project Overview
 
-nIndexer is a **semantic code search engine** that provides intelligent codebase indexing and search capabilities via WebSocket API. It powers MCP (Model Context Protocol) tools for AI assistants to search, analyze, and understand codebases.
+nIndexer is a **semantic code search engine** that provides intelligent codebase indexing and search capabilities via MCP (Model Context Protocol) over HTTP/SSE. It powers AI assistants to search, analyze, and understand codebases.
 
 ### Core Features
 
@@ -19,18 +19,19 @@ nIndexer is a **semantic code search engine** that provides intelligent codebase
 - **Hybrid Search** — Combines semantic + keyword with absolute semantic protection floor (>= 0.70) and boilerplate noise penalization
 - **Codebase Analysis** — Heuristic-based project understanding and file prioritization
 - **Multi-codebase Support** — Index and search across multiple projects simultaneously
+- **Auto-Discovery** — Automatically discovers and indexes projects from configured root directories
 
 ### Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      nIndexer Server                         │
-│  (src/server.js - WebSocket + HTTP on port 3666)            │
+│  (src/server.js - HTTP + SSE on port 3666)                  │
 ├─────────────────────────────────────────────────────────────┤
-│  API Router (src/api/router.js)                             │
-│  - JSON-RPC 2.0 message handling                            │
-│  - Client connection management                             │
-│  - Event subscriptions                                      │
+│  MCP Router (src/api/mcp-router.js)                         │
+│  - JSON-RPC 2.0 message handling over SSE                   │
+│  - Client session management                                │
+│  - Tool discovery and execution                             │
 ├─────────────────────────────────────────────────────────────┤
 │  Indexing Service (src/services/indexing.service.js)        │
 │  - Codebase management (index, refresh, remove)             │
@@ -53,8 +54,9 @@ nIndexer is a **semantic code search engine** that provides intelligent codebase
 
 | Component | Location | Purpose |
 |-----------|----------|---------|
-| **Server** | `src/server.js` | WebSocket HTTP server, client management |
-| **Router** | `src/api/router.js` | JSON-RPC message routing, subscriptions |
+| **Server** | `src/server.js` | HTTP server, SSE endpoint, client management |
+| **MCP Router** | `src/api/mcp-router.js` | JSON-RPC message routing, tool dispatch |
+| **MCP Stdio** | `src/mcp-stdio.js` | Stdio transport for Claude Desktop / Cursor |
 | **Indexing Service** | `src/services/indexing.service.js` | Codebase CRUD, search orchestration |
 | **Indexer** | `src/services/indexer.service.js` | File parsing, embedding generation |
 | **Metadata Store** | `src/services/metadata.service.js` | File manifest (paths, hashes, languages) |
@@ -62,6 +64,7 @@ nIndexer is a **semantic code search engine** that provides intelligent codebase
 | **Search Router** | `src/services/search-router.service.js` | Result ranking and combination |
 | **Maintenance** | `src/services/maintenance.service.js` | Stale file cleanup, auto-refresh |
 | **Project Analyzer** | `src/services/project-analyzer.service.js` | Heuristic codebase analysis |
+| **Discovery** | `src/services/discovery.service.js` | Auto-discovery from root directories |
 | **nVDB** | `nVDB/` | Rust vector database (submodule) |
 | **nLogger** | `nLogger/` | Logging utility (submodule) |
 
@@ -78,7 +81,7 @@ nIndexer is a **semantic code search engine** that provides intelligent codebase
 ### Testing
 
 ```bash
-# Start server
+# Start server (HTTP + SSE)
 node src/server.js
 
 # Development mode (auto-reload)
@@ -86,6 +89,9 @@ node --watch src/server.js
 
 # Health check
 curl http://localhost:3666/health
+
+# MCP stdio transport (for Claude Desktop / Cursor)
+node src/mcp-stdio.js
 ```
 
 ### MCP Tools Available
@@ -93,6 +99,7 @@ curl http://localhost:3666/health
 | Tool | Description |
 |------|-------------|
 | `list_codebases` | List all indexed codebases |
+| `list_spaces` | List available spaces (configured project roots) |
 | `index_codebase` | Index a new codebase |
 | `refresh_codebase` | Refresh an existing codebase |
 | `remove_codebase` | Remove a codebase from index |
@@ -106,6 +113,8 @@ curl http://localhost:3666/health
 | `get_file` | Get full file content |
 | `check_codebase_status` | Check staleness and file count |
 | `check_file_stale` | Check if specific file is stale |
+| `run_maintenance` | Trigger maintenance cycle |
+| `get_maintenance_stats` | Get maintenance statistics |
 | `get_codebase_description` | Get AI-generated project description |
 | `get_prioritized_files` | Get files ordered by importance |
 | `analyze_codebase` | Run heuristic analysis |
@@ -242,7 +251,8 @@ The logger automatically sanitizes metadata to prevent log bloat:
     "cors": false
   },
   "storage": {
-    "dataDir": "./data/codebases"
+    "dataDir": "./data/codebases",
+    "trashDir": "./data/trash"
   },
   "logs": {
     "dir": "./logs",
@@ -260,9 +270,20 @@ The logger automatically sanitizes metadata to prevent log bloat:
     "intervalMs": 900000,
     "autoRefresh": true
   },
+  "discovery": {
+    "roots": [],
+    "scanIntervalMs": 3600000
+  },
+  "llama": {
+    "port": 42718,
+    "modelPath": "bin/llama/models/jina-embeddings-v2-base-code-Q5_K_M.gguf",
+    "ctxSize": 8192,
+    "concurrencyLimit": 50
+  },
   "llm": {
-    "gatewayWsUrl": "ws://localhost:3400/v1/realtime",
-    "gatewayHttpUrl": "http://localhost:3400"
+    "provider": "local",
+    "maxConcurrentRequests": 100,
+    "remoteFallback": null
   }
 }
 ```

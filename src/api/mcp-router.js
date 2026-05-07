@@ -5,7 +5,6 @@
  */
 
 import { getLogger } from '../utils/logger.js';
-import { TOOLS_LIST } from './mcp-tools.js';
 
 const logger = getLogger();
 const PROTOCOL_VERSION = '2024-11-05';
@@ -77,7 +76,7 @@ export async function handleMcpMessage(message, session, indexingService) {
               break;
 
           case 'tools/list':
-              session.send(jsonrpcResponse(msgId, { tools: TOOLS_LIST }));
+              session.send(jsonrpcResponse(msgId, { tools: indexingService.getTools() }));
               break;
 
           case 'tools/call': {
