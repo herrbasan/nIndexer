@@ -5,10 +5,15 @@ import { getLogger } from '../utils/logger.js';
 const logger = getLogger();
 
 export class DiscoveryService {
-  constructor(indexingService, config = {}) {
+  constructor(indexingService, config = {}, staticCodebases = {}) {
     this.indexingService = indexingService;
     this.roots = config.roots || [];
     this.scanIntervalMs = config.scanIntervalMs || 3600000;
+    this.staticCodebases = staticCodebases || {};
+    this.staticNames = new Set(Object.keys(staticCodebases));
+    this.staticSources = new Set(
+      Object.values(staticCodebases).map(s => path.normalize(s).toLowerCase())
+    );
     this.intervalId = null;
     this.isScanning = false;
     this.lastScan = null;
@@ -94,6 +99,11 @@ export class DiscoveryService {
           const fullPath = path.join(root, entry.name);
           const name = toSnakeCase(entry.name);
 
+          // Skip if this path is already a statically configured codebase
+          if (this.staticSources.has(path.normalize(fullPath).toLowerCase())) {
+            continue;
+          }
+
           let mtime;
           try {
             const stat = await fs.stat(fullPath);
@@ -147,6 +157,8 @@ export class DiscoveryService {
     }
 
     for (const cb of indexed) {
+      // Never remove statically configured codebases
+      if (this.staticNames.has(cb.name)) continue;
       if (!discoveredNames.has(cb.name)) {
         toRemove.push(cb.name);
       }

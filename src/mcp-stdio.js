@@ -44,8 +44,25 @@ async function startStdioServer() {
       gateway: llmClient
     });
 
+    // Load statically configured codebases (non-blocking)
+    if (config.codebases && Object.keys(config.codebases).length > 0) {
+      (async () => {
+        const existing = await indexingService.listCodebases();
+        const existingNames = new Set(existing.map(cb => cb.name));
+        for (const [name, source] of Object.entries(config.codebases)) {
+          if (existingNames.has(name)) continue;
+          try {
+            await indexingService.indexCodebase({ name, source });
+            logger.info(`Static codebase indexed`, { name, source }, 'Stdio');
+          } catch (err) {
+            logger.error(`Failed to index static codebase`, err, { name, source }, 'Stdio');
+          }
+        }
+      })();
+    }
+
     if (config.discovery?.roots?.length > 0) {
-      discoveryService = new DiscoveryService(indexingService, config.discovery);
+      discoveryService = new DiscoveryService(indexingService, config.discovery, config.codebases);
       indexingService.maintenance.setDiscoveryService(discoveryService);
       discoveryService.start();
     }

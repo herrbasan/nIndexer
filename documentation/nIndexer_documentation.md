@@ -624,6 +624,9 @@ Service configuration. Paths can be relative (resolved from project root) or abs
     ],
     "scanIntervalMs": 3600000
   },
+  "codebases": {
+    "my_project": "D:\\Projects\\MyProject"
+  },
   "llama": {
     "port": 42718,
     "modelPath": "bin/llama/models/jina-embeddings-v2-base-code-Q5_K_M.gguf",
@@ -658,6 +661,7 @@ Service configuration. Paths can be relative (resolved from project root) or abs
 | `maintenance` | `autoRefresh` | boolean | Auto-refresh stale codebases (default: `true`) |
 | `discovery` | `roots` | string[] | Root directories to scan for projects |
 | `discovery` | `scanIntervalMs` | number | Discovery re-scan interval in ms (default: `3600000`) |
+| `codebases` | *(keys)* | string | Map of codebase name → absolute source path. Loaded at startup, never removed by discovery |
 | `llama` | `port` | number | Embedded local LLaMA HTTP port |
 | `llama` | `modelPath` | string | Path to GGUF model for local embeddings |
 | `llama` | `concurrencyLimit` | number | Semaphore size for concurrent llama-server requests |

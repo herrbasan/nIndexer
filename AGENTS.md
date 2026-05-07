@@ -274,6 +274,9 @@ The logger automatically sanitizes metadata to prevent log bloat:
     "roots": [],
     "scanIntervalMs": 3600000
   },
+  "codebases": {
+    "my_project": "D:\\Projects\\MyProject"
+  },
   "llama": {
     "port": 42718,
     "modelPath": "bin/llama/models/jina-embeddings-v2-base-code-Q5_K_M.gguf",
@@ -309,6 +312,21 @@ cd nLogger && git pull origin main && cd ..
 git add nVDB nLogger
 git commit -m "Update submodules"
 ```
+
+### Static Codebases vs Discovery
+
+You can define individual codebases directly in `config.json` under the `codebases` key. These are loaded once at startup and are **never removed by discovery**.
+
+```json
+{
+  "codebases": {
+    "my_project": "D:\\Projects\\MyProject",
+    "another": "\\\\SERVER\\Share\\Code\\Another"
+  }
+}
+```
+
+If a `codebases` source path happens to fall under a `discovery.roots` directory, discovery will **skip it automatically** to prevent duplicate indexing.
 
 ## Common Tasks
 

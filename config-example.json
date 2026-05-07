@@ -5,7 +5,12 @@
     "cors": false
   },
   "storage": {
-    "dataDir": "./data/codebases"
+    "dataDir": "./data/codebases",
+    "trashDir": "./data/trash"
+  },
+  "logs": {
+    "dir": "./logs",
+    "retentionDays": 7
   },
   "indexing": {
     "embeddingDimension": 768,
@@ -56,11 +61,23 @@
   },
   "maintenance": {
     "enabled": true,
-    "intervalMs": 3600000,
+    "intervalMs": 900000,
     "autoRefresh": true
   },
+  "discovery": {
+    "roots": [],
+    "scanIntervalMs": 3600000
+  },
+  "codebases": {},
+  "llama": {
+    "port": 42718,
+    "modelPath": "bin/llama/models/jina-embeddings-v2-base-code-Q5_K_M.gguf",
+    "ctxSize": 8192,
+    "concurrencyLimit": 50
+  },
   "llm": {
-    "gatewayWsUrl": "ws://localhost:3400/v1/realtime",
-    "gatewayHttpUrl": "http://localhost:3400"
+    "provider": "local",
+    "maxConcurrentRequests": 100,
+    "remoteFallback": null
   }
 }
